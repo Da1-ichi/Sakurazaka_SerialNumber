@@ -1,0 +1,294 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #0f172a;
+  background: #f1f5f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  border-radius: 14px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+h1, h2, p {
+  margin: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+  background: #f1f5f9;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 24px;
+  padding: 20px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
+}
+
+.hero-card {
+  margin-bottom: 24px;
+}
+
+.hero-card p {
+  margin-top: 8px;
+  color: #475569;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.small-gap {
+  gap: 8px;
+  margin-top: 0;
+}
+
+.button-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.primary {
+  background: #0f172a;
+  color: #fff;
+  border-color: #0f172a;
+}
+
+.accent {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+
+.success {
+  background: #059669;
+  color: #fff;
+  border-color: #059669;
+}
+
+.full {
+  width: 100%;
+  margin-top: 14px;
+}
+
+.danger-outline {
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.status-box,
+.notice-box,
+.empty-box,
+.preview-box {
+  border-radius: 16px;
+  background: #f8fafc;
+  padding: 12px 14px;
+}
+
+.status-box,
+.notice-box {
+  margin-top: 14px;
+}
+
+.notice-box {
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.content-grid {
+  display: grid;
+  gap: 24px;
+}
+
+.camera-wrapper {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  background: #000;
+}
+
+.camera-video {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  display: block;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+}
+
+.guide-label {
+  position: absolute;
+  left: 50%;
+  top: 64%;
+  transform: translate(-50%, -50%);
+  background: rgba(16, 185, 129, 0.92);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.guide-frame {
+  position: absolute;
+  left: 50%;
+  top: 74%;
+  width: 72%;
+  aspect-ratio: 6 / 1.1;
+  transform: translate(-50%, -50%);
+  border: 4px solid #34d399;
+  border-radius: 16px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+}
+
+.preview-grid {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.preview-grid h2,
+.side-column h2 {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.text-box {
+  min-height: 120px;
+  white-space: pre-wrap;
+}
+
+.image-box {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-box img {
+  max-width: 100%;
+  max-height: 180px;
+  border-radius: 12px;
+}
+
+.side-column {
+  display: grid;
+  gap: 24px;
+}
+
+.candidate-list,
+.saved-list {
+  display: grid;
+  gap: 12px;
+}
+
+.candidate-item,
+.saved-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  padding: 12px;
+}
+
+.candidate-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.saved-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.serial-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.subtle-text {
+  color: #64748b;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.warning-text {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+@media (min-width: 900px) {
+  .content-grid {
+    grid-template-columns: 1.2fr 0.8fr;
+  }
+
+  .preview-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 12px;
+  }
+
+  .card {
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .saved-item,
+  .section-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .button-column {
+    flex-direction: row;
+  }
+}
