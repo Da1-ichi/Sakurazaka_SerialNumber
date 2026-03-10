@@ -201,11 +201,12 @@ export default function SerialReaderPrototype() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
 
-  // 細すぎたので、文字列帯＋少し余白に戻す
-  const cropWidth = Math.floor(vw * 0.64);
-  const cropHeight = Math.floor(vh * 0.11);
-  const cropX = Math.floor(vw * 0.18);
-  const cropY = Math.floor(vh * 0.73);
+  // ガイド枠の実位置に合わせる
+  // 前回は下に寄りすぎて注意書きを読んでいたので、少し上へ補正
+  const cropWidth = Math.floor(vw * 0.52);
+  const cropHeight = Math.floor(vh * 0.085);
+  const cropX = Math.floor(vw * 0.20);
+  const cropY = Math.floor(vh * 0.70);
 
   canvas.width = cropWidth;
   canvas.height = cropHeight;
@@ -217,6 +218,7 @@ export default function SerialReaderPrototype() {
 
   const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
   const data = imageData.data;
+
   for (let i = 0; i < data.length; i += 4) {
     const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
     const boosted = avg > 165 ? 255 : 0;
@@ -224,6 +226,7 @@ export default function SerialReaderPrototype() {
     data[i + 1] = boosted;
     data[i + 2] = boosted;
   }
+
   ctx.putImageData(imageData, 0, 0);
 
   return canvas.toDataURL("image/png");
