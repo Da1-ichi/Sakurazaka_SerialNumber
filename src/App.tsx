@@ -1,16 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-
-/**
- * シリアル読み取り試作版
- * - スマホの背面カメラを起動
- * - 画面中央のガイド枠を表示
- * - 撮影したフレームからガイド枠内だけ切り出し
- * - OCR結果から英数字13桁候補を抽出
- * - 一覧保持 / コピー / 削除
- * - 手動修正
- * - 連続スキャン
- * - 同一コードの連続保存防止
- */
+import "./styles.css";
 
 const SERIAL_REGEX = /[A-Z0-9]{13}/g;
 const STORAGE_KEY = "serial-reader-items";
@@ -170,7 +159,7 @@ export default function SerialReaderPrototype() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // 一個前のサイズに戻す
+    // 一個前のサイズ
     const cropWidth = Math.floor(vw * 0.72);
     const cropHeight = Math.floor(vh * 0.16);
     const cropX = Math.floor((vw - cropWidth) / 2);
@@ -202,7 +191,7 @@ export default function SerialReaderPrototype() {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return false;
 
-    let saved = false;
+    let didSave = false;
 
     setItems((prev) => {
       if (prev[0]?.code === trimmed) {
@@ -212,21 +201,22 @@ export default function SerialReaderPrototype() {
         return prev;
       }
 
-      const next: SerialItem = {
-        id: crypto.randomUUID(),
-        code: trimmed,
-        createdAt: new Date().toISOString(),
-      };
-
-      saved = true;
-      return [next, ...prev];
+      didSave = true;
+      return [
+        {
+          id: crypto.randomUUID(),
+          code: trimmed,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev,
+      ];
     });
 
-    if (saved && options?.isAuto) {
+    if (didSave && options?.isAuto) {
       setLastAutoSavedCode(trimmed);
     }
 
-    return saved;
+    return didSave;
   }
 
   async function readSerial(options?: { autoSave?: boolean }) {
@@ -363,48 +353,38 @@ export default function SerialReaderPrototype() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 pb-28 text-slate-900">
-      <div className="mx-auto max-w-5xl p-4 md:p-6">
-        <div className="mb-6 rounded-3xl bg-white p-5 shadow-sm">
-          <h1 className="text-2xl font-bold">シリアル読み取り試作版</h1>
-          <p className="mt-2 text-sm text-slate-600">
+    <div className="app-shell">
+      <div className="app-container">
+        <div className="panel">
+          <h1 className="title">シリアル読み取り試作版</h1>
+          <p className="description">
             カメラ映像の中央ガイドに「シリアルナンバー」枠を合わせて読み取ります。
           </p>
 
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button
-              onClick={startCamera}
-              className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
-            >
+          <div className="button-row">
+            <button onClick={startCamera} className="btn btn-primary">
               カメラ起動
             </button>
-            <button
-              onClick={() => readSerial()}
-              disabled={status !== "ready"}
-              className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
+            <button onClick={() => readSerial()} disabled={status !== "ready"} className="btn btn-read">
               読み取る
             </button>
-            <button
-              onClick={stopCamera}
-              className="rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium"
-            >
+            <button onClick={stopCamera} className="btn btn-secondary">
               カメラ停止
             </button>
           </div>
 
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <label className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3 py-3 text-sm">
+          <div className="control-grid">
+            <label className="control-box">
               <input
                 type="checkbox"
                 checked={autoScanEnabled}
                 onChange={(e) => setAutoScanEnabled(e.target.checked)}
               />
-              連続スキャン
+              <span>連続スキャン</span>
             </label>
 
-            <label className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3 py-3 text-sm">
-              間隔(ms)
+            <label className="control-box">
+              <span>間隔(ms)</span>
               <input
                 type="number"
                 min={800}
@@ -412,178 +392,129 @@ export default function SerialReaderPrototype() {
                 step={100}
                 value={autoScanIntervalMs}
                 onChange={(e) => setAutoScanIntervalMs(Number(e.target.value) || 1200)}
-                className="w-24 rounded-lg border border-slate-300 px-2 py-1"
+                className="number-input"
               />
             </label>
 
-            <div className="rounded-2xl bg-slate-50 px-3 py-3 text-sm text-slate-700">
+            <div className="control-box">
               連続状態: {isAutoScanning ? "実行中" : "停止中"}
             </div>
           </div>
 
-          <div className="mt-3 rounded-2xl bg-slate-50 px-3 py-2 text-sm text-slate-700">
-            状態: {statusText}
-          </div>
+          <div className="status-box">状態: {statusText}</div>
 
           {lastAutoSavedCode && (
-            <div className="mt-3 rounded-2xl bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-              直近の自動保存: <span className="font-mono">{lastAutoSavedCode}</span>
+            <div className="auto-save-box">
+              直近の自動保存: <span className="mono">{lastAutoSavedCode}</span>
             </div>
           )}
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="rounded-3xl bg-white p-4 shadow-sm">
-            <div className="relative overflow-hidden rounded-3xl bg-black">
-              <video
-                ref={videoRef}
-                playsInline
-                muted
-                autoPlay
-                className="aspect-[3/4] w-full object-cover"
-              />
+        <div className="main-grid">
+          <div className="panel">
+            <div className="camera-frame">
+              <video ref={videoRef} playsInline muted autoPlay className="camera-video" />
 
-              <div className="pointer-events-none absolute inset-0">
-                <div className="absolute inset-0 bg-black/25" />
-
-                <div
-                  className="absolute left-1/2 top-[74%] w-[72%] -translate-x-1/2 -translate-y-1/2 rounded-xl border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
-                  style={{ aspectRatio: "6 / 1.1" }}
-                />
-
-                <div className="absolute left-1/2 top-[64%] -translate-x-1/2 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
-                  この枠にシリアル欄を合わせる
-                </div>
+              <div className="camera-overlay">
+                <div className="camera-dim" />
+                <div className="guide-box" />
+                <div className="guide-label">この枠にシリアル欄を合わせる</div>
               </div>
             </div>
 
-            <canvas ref={canvasRef} className="hidden" />
+            <canvas ref={canvasRef} className="hidden-canvas" />
 
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="preview-grid">
               <div>
-                <h2 className="mb-2 text-sm font-semibold">OCR生テキスト</h2>
-                <div className="min-h-28 whitespace-pre-wrap rounded-2xl bg-slate-50 p-3 text-sm text-slate-700">
-                  {rawText || "まだ読み取り結果はありません"}
-                </div>
+                <h2 className="section-title">OCR生テキスト</h2>
+                <div className="preview-box">{rawText || "まだ読み取り結果はありません"}</div>
               </div>
 
               <div>
-                <h2 className="mb-2 text-sm font-semibold">切り出し画像</h2>
-                <div className="flex min-h-28 items-center justify-center overflow-hidden rounded-2xl bg-slate-50 p-2">
+                <h2 className="section-title">切り出し画像</h2>
+                <div className="preview-box image-box">
                   {lastSnapshot ? (
-                    <img src={lastSnapshot} alt="snapshot" className="max-h-40 rounded-lg" />
+                    <img src={lastSnapshot} alt="snapshot" className="snapshot-image" />
                   ) : (
-                    <span className="text-sm text-slate-500">まだ画像はありません</span>
+                    <span className="muted">まだ画像はありません</span>
                   )}
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="space-y-6">
-            <div className="rounded-3xl bg-white p-4 shadow-sm">
-              <h2 className="text-lg font-semibold">候補</h2>
-              <div className="mt-3 space-y-2">
+          <div className="side-column">
+            <div className="panel">
+              <h2 className="section-heading">候補</h2>
+              <div className="candidate-list">
                 {candidates.length === 0 ? (
-                  <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-                    読み取り候補はまだありません
-                  </div>
+                  <div className="empty-box">読み取り候補はまだありません</div>
                 ) : (
                   candidates.map((candidate) => (
-                    <label
-                      key={candidate}
-                      className="flex cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 p-3"
-                    >
+                    <label key={candidate} className="candidate-item">
                       <input
                         type="radio"
                         name="candidate"
                         checked={selectedCandidate === candidate}
                         onChange={() => setSelectedCandidate(candidate)}
                       />
-                      <span className="font-mono text-base tracking-wide">{candidate}</span>
+                      <span className="mono candidate-text">{candidate}</span>
                     </label>
                   ))
                 )}
               </div>
 
-              <div className="mt-4">
-                <div className="mb-1 text-sm font-semibold">手動修正</div>
+              <div className="manual-edit">
+                <div className="manual-label">手動修正</div>
                 <input
                   type="text"
                   value={selectedCandidate}
                   onChange={(e) => setSelectedCandidate(e.target.value.toUpperCase())}
                   maxLength={13}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-mono tracking-wide"
+                  className="text-input mono"
                   placeholder="ここで修正できます"
                 />
               </div>
 
-              <button
-                onClick={addSelected}
-                disabled={!selectedCandidate}
-                className="mt-4 w-full rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              >
+              <button onClick={addSelected} disabled={!selectedCandidate} className="btn btn-save full-width">
                 選択中のコードを保存
               </button>
             </div>
 
-            <div className="rounded-3xl bg-white p-4 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold">保存済みコード</h2>
-                <div className="flex gap-2">
-                  <button
-                    onClick={copyAll}
-                    className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-medium"
-                  >
+            <div className="panel">
+              <div className="panel-header">
+                <h2 className="section-heading">保存済みコード</h2>
+                <div className="small-button-row">
+                  <button onClick={copyAll} className="btn btn-small btn-secondary">
                     全件コピー
                   </button>
-                  <button
-                    onClick={clearAll}
-                    className="rounded-xl border border-red-300 px-3 py-2 text-xs font-medium text-red-700"
-                  >
+                  <button onClick={clearAll} className="btn btn-small btn-danger">
                     全削除
                   </button>
                 </div>
               </div>
 
-              {copiedMessage && (
-                <div className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm text-blue-700">
-                  {copiedMessage}
-                </div>
-              )}
+              {copiedMessage && <div className="copied-box">{copiedMessage}</div>}
 
-              <div className="mt-3 space-y-3">
+              <div className="saved-list">
                 {items.length === 0 ? (
-                  <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-                    まだ保存されていません
-                  </div>
+                  <div className="empty-box">まだ保存されていません</div>
                 ) : (
                   items.map((item) => (
-                    <div key={item.id} className="rounded-2xl border border-slate-200 p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="font-mono text-lg tracking-wide">{item.code}</div>
-                          <div className="mt-1 text-xs text-slate-500">
-                            登録: {formatDate(item.createdAt)}
-                          </div>
-                          {duplicateSet.has(item.code) && (
-                            <div className="mt-1 text-xs font-medium text-amber-700">重複あり</div>
-                          )}
-                        </div>
-                        <div className="flex shrink-0 gap-2">
-                          <button
-                            onClick={() => copyCode(item.code)}
-                            className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-medium text-white"
-                          >
-                            コピー
-                          </button>
-                          <button
-                            onClick={() => removeItem(item.id)}
-                            className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-medium"
-                          >
-                            削除
-                          </button>
-                        </div>
+                    <div key={item.id} className="saved-item">
+                      <div className="saved-left">
+                        <div className="mono saved-code">{item.code}</div>
+                        <div className="saved-date">登録: {formatDate(item.createdAt)}</div>
+                        {duplicateSet.has(item.code) && <div className="duplicate-text">重複あり</div>}
+                      </div>
+
+                      <div className="saved-actions">
+                        <button onClick={() => copyCode(item.code)} className="btn btn-small btn-primary">
+                          コピー
+                        </button>
+                        <button onClick={() => removeItem(item.id)} className="btn btn-small btn-secondary">
+                          削除
+                        </button>
                       </div>
                     </div>
                   ))
@@ -594,14 +525,14 @@ export default function SerialReaderPrototype() {
         </div>
       </div>
 
-      <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
+      <div className="bottom-shutter-wrap">
         <button
           onClick={() => readSerial()}
           disabled={status !== "ready"}
           aria-label="読み取る"
-          className="flex h-20 w-20 items-center justify-center rounded-full border-4 border-slate-300 bg-white shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
+          className="bottom-shutter"
         >
-          <div className="h-14 w-14 rounded-full border-2 border-slate-400 bg-slate-100" />
+          <div className="bottom-shutter-inner" />
         </button>
       </div>
     </div>
