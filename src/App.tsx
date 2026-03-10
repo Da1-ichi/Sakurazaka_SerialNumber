@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
 
 const SERIAL_REGEX = /[A-Z0-9]{13}/g;
+const FIXED_SUFFIX = "9V";
 const STORAGE_KEY = "serial-reader-items";
 
 type SerialItem = {
@@ -19,26 +20,67 @@ function normalizeText(text: string): string {
     .replace(/[Ｏ]/g, "0")
     .replace(/[ＩＬ]/g, "1")
     .replace(/[Ｂ]/g, "8")
+    .replace(/[Ｓ]/g, "5")
+    .replace(/[Ｚ]/g, "2")
     .replace(/[\s\-—_]/g, "")
     .replace(/[^A-Z0-9]/g, " ");
 }
 
+function scoreCandidate(code: string): number {
+  let score = 0;
+
+  if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
+  if (code.endsWith(FIXED_SUFFIX)) score += 120;
+
+  if (/\d/.test(code)) score += 10;
+  if (/[A-Z]/.test(code)) score += 10;
+
+  if (!/(.)\1{3,}/.test(code)) score += 10;
+
+  return score;
+}
+
 function extractSerialCandidates(text: string): string[] {
-  const normalized = normalizeText(text);
-  const set = new Set<string>();
+  const base = normalizeText(text);
 
-  const direct = normalized.match(SERIAL_REGEX) ?? [];
-  direct.forEach((v) => set.add(v));
+  const variants = [
+    base,
+    base
+      .replace(/O/g, "0")
+      .replace(/[IL]/g, "1")
+      .replace(/Z/g, "2")
+      .replace(/S/g, "5")
+      .replace(/B/g, "8"),
+    base
+      .replace(/0/g, "O")
+      .replace(/1/g, "I")
+      .replace(/2/g, "Z")
+      .replace(/5/g, "S")
+      .replace(/8/g, "B"),
+  ];
 
-  const compact = normalized.replace(/\s+/g, "");
-  for (let i = 0; i <= compact.length - 13; i += 1) {
-    const chunk = compact.slice(i, i + 13);
-    if (/^[A-Z0-9]{13}$/.test(chunk)) {
-      set.add(chunk);
+  const scored = new Map<string, number>();
+
+  for (const normalized of variants) {
+    const direct = normalized.match(SERIAL_REGEX) ?? [];
+    for (const value of direct) {
+      const score = scoreCandidate(value);
+      scored.set(value, Math.max(scored.get(value) ?? 0, score));
+    }
+
+    const compact = normalized.replace(/\s+/g, "");
+    for (let i = 0; i <= compact.length - 13; i += 1) {
+      const chunk = compact.slice(i, i + 13);
+      if (/^[A-Z0-9]{13}$/.test(chunk)) {
+        const score = scoreCandidate(chunk);
+        scored.set(chunk, Math.max(scored.get(chunk) ?? 0, score));
+      }
     }
   }
 
-  return [...set];
+  return [...scored.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([value]) => value);
 }
 
 function formatDate(iso: string): string {
@@ -159,11 +201,12 @@ export default function SerialReaderPrototype() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // 一個前のサイズ
-    const cropWidth = Math.floor(vw * 0.72);
-    const cropHeight = Math.floor(vh * 0.16);
-    const cropX = Math.floor((vw - cropWidth) / 2);
-    const cropY = Math.floor(vh * 0.74);
+    // 文字列部分だけを細く読む
+    // QRや枠線、小見出しをなるべく外す
+    const cropWidth = Math.floor(vw * 0.52);
+    const cropHeight = Math.floor(vh * 0.07);
+    const cropX = Math.floor(vw * 0.20);
+    const cropY = Math.floor(vh * 0.765);
 
     canvas.width = cropWidth;
     canvas.height = cropHeight;
@@ -177,7 +220,7 @@ export default function SerialReaderPrototype() {
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
       const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const boosted = avg > 150 ? 255 : 0;
+      const boosted = avg > 170 ? 255 : 0;
       data[i] = boosted;
       data[i + 1] = boosted;
       data[i + 2] = boosted;
@@ -253,7 +296,11 @@ export default function SerialReaderPrototype() {
         const saved = saveCode(found[0], { silent: true, isAuto: true });
         setStatusText(saved ? `自動保存: ${found[0]}` : `同一コードをスキップ: ${found[0]}`);
       } else {
-        setStatusText(found.length > 0 ? `候補 ${found.length} 件` : "候補なし。位置を合わせ直してください。");
+        setStatusText(
+          found.length > 0
+            ? `候補 ${found.length} 件（${FIXED_SUFFIX}優先）`
+            : "候補なし。位置を合わせ直してください。"
+        );
       }
 
       setStatus("ready");
@@ -358,7 +405,7 @@ export default function SerialReaderPrototype() {
         <div className="panel">
           <h1 className="title">シリアル読み取り試作版</h1>
           <p className="description">
-            カメラ映像の中央ガイドに「シリアルナンバー」枠を合わせて読み取ります。
+            カメラ映像の中央ガイドに「シリアル文字列」を合わせて読み取ります。
           </p>
 
           <div className="button-row">
@@ -396,9 +443,7 @@ export default function SerialReaderPrototype() {
               />
             </label>
 
-            <div className="control-box">
-              連続状態: {isAutoScanning ? "実行中" : "停止中"}
-            </div>
+            <div className="control-box">連続状態: {isAutoScanning ? "実行中" : "停止中"}</div>
           </div>
 
           <div className="status-box">状態: {statusText}</div>
@@ -417,8 +462,8 @@ export default function SerialReaderPrototype() {
 
               <div className="camera-overlay">
                 <div className="camera-dim" />
-                <div className="guide-box" />
-                <div className="guide-label">この枠にシリアル欄を合わせる</div>
+                <div className="guide-box guide-box-tight" />
+                <div className="guide-label guide-label-tight">この枠にコード文字列を合わせる</div>
               </div>
             </div>
 
