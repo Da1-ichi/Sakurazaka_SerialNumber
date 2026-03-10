@@ -3,18 +3,17 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /**
  * シリアル読み取り試作版
  * - スマホの背面カメラを起動
- * - 画面中央のガイド枠を表示
+ * - 画面中央の大きめガイド枠を表示
  * - 撮影したフレームからガイド枠内だけ切り出し
  * - OCR結果から英数字13桁候補を抽出
  * - 一覧保持 / コピー / 削除
- *
- * 注意:
- * - OCR は Tesseract.js を利用する想定です。
- * - この canvas 環境では依存のインストール状態により OCR が実行できない場合があります。
- * - 実運用では Vite/Next.js などで動かす前提です。
+ * - 手動修正
+ * - 連続スキャン
+ * - 同一コードの連続保存防止
  */
 
 const SERIAL_REGEX = /[A-Z0-9]{13}/g;
+const STORAGE_KEY = "serial-reader-items";
 
 type SerialItem = {
   id: string;
@@ -77,7 +76,7 @@ export default function SerialReaderPrototype() {
   const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
 
   useEffect(() => {
-    const saved = localStorage.getItem("serial-reader-items");
+    const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as SerialItem[];
@@ -95,7 +94,7 @@ export default function SerialReaderPrototype() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("serial-reader-items", JSON.stringify(items));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
   }, [items]);
 
   useEffect(() => {
@@ -171,12 +170,11 @@ export default function SerialReaderPrototype() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // 画像上での切り抜き位置
-    // 画面中央やや下にある「シリアルナンバー」枠を想定した比率
-    const cropWidth = Math.floor(vw * 0.72);
-    const cropHeight = Math.floor(vh * 0.16);
+    // 読み取り枠を少し大きめに
+    const cropWidth = Math.floor(vw * 0.9);
+    const cropHeight = Math.floor(vh * 0.25);
     const cropX = Math.floor((vw - cropWidth) / 2);
-    const cropY = Math.floor(vh * 0.74);
+    const cropY = Math.floor(vh * 0.68);
 
     canvas.width = cropWidth;
     canvas.height = cropHeight;
@@ -199,6 +197,35 @@ export default function SerialReaderPrototype() {
     ctx.putImageData(imageData, 0, 0);
 
     return canvas.toDataURL("image/png");
+  }
+
+  function saveCode(code: string, options?: { silent?: boolean; isAuto?: boolean }) {
+    const trimmed = code.trim().toUpperCase();
+    if (!trimmed) return false;
+
+    setItems((prev) => {
+      // 同一コードの連続保存防止
+      if (prev[0]?.code === trimmed) {
+        if (!options?.silent) {
+          setStatusText(`同一コードを連続保存しないようスキップ: ${trimmed}`);
+        }
+        return prev;
+      }
+
+      const next: SerialItem = {
+        id: crypto.randomUUID(),
+        code: trimmed,
+        createdAt: new Date().toISOString(),
+      };
+
+      return [next, ...prev];
+    });
+
+    if (options?.isAuto) {
+      setLastAutoSavedCode(trimmed);
+    }
+
+    return true;
   }
 
   async function readSerial(options?: { autoSave?: boolean }) {
@@ -232,14 +259,8 @@ export default function SerialReaderPrototype() {
       setSelectedCandidate(found[0] ?? "");
 
       if (options?.autoSave && found[0]) {
-        const next: SerialItem = {
-          id: crypto.randomUUID(),
-          code: found[0],
-          createdAt: new Date().toISOString(),
-        };
-        setItems((prev) => [next, ...prev]);
-        setLastAutoSavedCode(found[0]);
-        setStatusText(`自動保存: ${found[0]}`);
+        saveCode(found[0], { silent: true, isAuto: true });
+        setStatusText(`自動保存候補: ${found[0]}`);
       } else {
         setStatusText(found.length > 0 ? `候補 ${found.length} 件` : "候補なし。位置を合わせ直してください。");
       }
@@ -290,16 +311,15 @@ export default function SerialReaderPrototype() {
     return () => {
       if (!autoScanEnabled) stopAutoScan();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoScanEnabled, autoScanIntervalMs, status]);
 
   function addSelected() {
     if (!selectedCandidate) return;
-    const next: SerialItem = {
-      id: crypto.randomUUID(),
-      code: selectedCandidate,
-      createdAt: new Date().toISOString(),
-    };
-    setItems((prev) => [next, ...prev]);
+    const saved = saveCode(selectedCandidate);
+    if (saved) {
+      setStatusText(`保存しました: ${selectedCandidate.toUpperCase()}`);
+    }
   }
 
   async function copyCode(code: string) {
@@ -338,10 +358,11 @@ export default function SerialReaderPrototype() {
   function clearAll() {
     if (!window.confirm("保存済みコードを全削除しますか？")) return;
     setItems([]);
+    setLastAutoSavedCode("");
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
+    <div className="min-h-screen bg-slate-100 pb-28 text-slate-900">
       <div className="mx-auto max-w-5xl p-4 md:p-6">
         <div className="mb-6 rounded-3xl bg-white p-5 shadow-sm">
           <h1 className="text-2xl font-bold">シリアル読み取り試作版</h1>
@@ -355,13 +376,6 @@ export default function SerialReaderPrototype() {
               className="rounded-2xl bg-slate-900 px-4 py-2 text-sm font-medium text-white"
             >
               カメラ起動
-            </button>
-            <button
-              onClick={readSerial}
-              disabled={status !== "ready"}
-              className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              読み取る
             </button>
             <button
               onClick={stopCamera}
@@ -425,11 +439,11 @@ export default function SerialReaderPrototype() {
                 <div className="absolute inset-0 bg-black/25" />
 
                 <div
-                  className="absolute left-1/2 top-[74%] w-[72%] -translate-x-1/2 -translate-y-1/2 rounded-xl border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
-                  style={{ aspectRatio: "6 / 1.1" }}
+                  className="absolute left-1/2 top-[68%] w-[90%] -translate-x-1/2 -translate-y-1/2 rounded-xl border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+                  style={{ aspectRatio: "6 / 1.6" }}
                 />
 
-                <div className="absolute left-1/2 top-[64%] -translate-x-1/2 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
+                <div className="absolute left-1/2 top-[57%] -translate-x-1/2 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
                   この枠にシリアル欄を合わせる
                 </div>
               </div>
@@ -440,7 +454,7 @@ export default function SerialReaderPrototype() {
             <div className="mt-4 grid gap-4 md:grid-cols-2">
               <div>
                 <h2 className="mb-2 text-sm font-semibold">OCR生テキスト</h2>
-                <div className="min-h-28 rounded-2xl bg-slate-50 p-3 text-sm text-slate-700 whitespace-pre-wrap">
+                <div className="min-h-28 whitespace-pre-wrap rounded-2xl bg-slate-50 p-3 text-sm text-slate-700">
                   {rawText || "まだ読み取り結果はありません"}
                 </div>
               </div>
@@ -484,6 +498,18 @@ export default function SerialReaderPrototype() {
                 )}
               </div>
 
+              <div className="mt-4">
+                <div className="mb-1 text-sm font-semibold">手動修正</div>
+                <input
+                  type="text"
+                  value={selectedCandidate}
+                  onChange={(e) => setSelectedCandidate(e.target.value.toUpperCase())}
+                  maxLength={13}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 font-mono tracking-wide"
+                  placeholder="ここで修正できます"
+                />
+              </div>
+
               <button
                 onClick={addSelected}
                 disabled={!selectedCandidate}
@@ -525,10 +551,7 @@ export default function SerialReaderPrototype() {
                   </div>
                 ) : (
                   items.map((item) => (
-                    <div
-                      key={item.id}
-                      className="rounded-2xl border border-slate-200 p-3"
-                    >
+                    <div key={item.id} className="rounded-2xl border border-slate-200 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="font-mono text-lg tracking-wide">{item.code}</div>
@@ -561,6 +584,17 @@ export default function SerialReaderPrototype() {
             </div>
           </div>
         </div>
+      </div>
+
+      <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
+        <button
+          onClick={() => readSerial()}
+          disabled={status !== "ready"}
+          aria-label="読み取る"
+          className="flex h-20 w-20 items-center justify-center rounded-full border-4 border-slate-300 bg-white shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <div className="h-14 w-14 rounded-full border-2 border-slate-400 bg-slate-100" />
+        </button>
       </div>
     </div>
   );
