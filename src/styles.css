@@ -477,13 +477,13 @@ input {
   }
   
 　.guide-box-tight {
-  width: 52%;
-  top: 76.5%;
-  aspect-ratio: 8 / 1;
+  width: 64%;
+  top: 73%;
+  aspect-ratio: 7 / 1.2;
 }
 
 .guide-label-tight {
-  top: 68.5%;
+  top: 65%;
 }
   
 }
