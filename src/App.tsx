@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /**
  * シリアル読み取り試作版
  * - スマホの背面カメラを起動
- * - 画面中央の大きめガイド枠を表示
+ * - 画面中央のガイド枠を表示
  * - 撮影したフレームからガイド枠内だけ切り出し
  * - OCR結果から英数字13桁候補を抽出
  * - 一覧保持 / コピー / 削除
@@ -170,11 +170,11 @@ export default function SerialReaderPrototype() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // 読み取り枠を少し大きめに
-    const cropWidth = Math.floor(vw * 0.9);
-    const cropHeight = Math.floor(vh * 0.25);
+    // 一個前のサイズに戻す
+    const cropWidth = Math.floor(vw * 0.72);
+    const cropHeight = Math.floor(vh * 0.16);
     const cropX = Math.floor((vw - cropWidth) / 2);
-    const cropY = Math.floor(vh * 0.68);
+    const cropY = Math.floor(vh * 0.74);
 
     canvas.width = cropWidth;
     canvas.height = cropHeight;
@@ -184,7 +184,6 @@ export default function SerialReaderPrototype() {
 
     ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
 
-    // 軽い前処理
     const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
@@ -203,8 +202,9 @@ export default function SerialReaderPrototype() {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return false;
 
+    let saved = false;
+
     setItems((prev) => {
-      // 同一コードの連続保存防止
       if (prev[0]?.code === trimmed) {
         if (!options?.silent) {
           setStatusText(`同一コードを連続保存しないようスキップ: ${trimmed}`);
@@ -218,14 +218,15 @@ export default function SerialReaderPrototype() {
         createdAt: new Date().toISOString(),
       };
 
+      saved = true;
       return [next, ...prev];
     });
 
-    if (options?.isAuto) {
+    if (saved && options?.isAuto) {
       setLastAutoSavedCode(trimmed);
     }
 
-    return true;
+    return saved;
   }
 
   async function readSerial(options?: { autoSave?: boolean }) {
@@ -259,8 +260,8 @@ export default function SerialReaderPrototype() {
       setSelectedCandidate(found[0] ?? "");
 
       if (options?.autoSave && found[0]) {
-        saveCode(found[0], { silent: true, isAuto: true });
-        setStatusText(`自動保存候補: ${found[0]}`);
+        const saved = saveCode(found[0], { silent: true, isAuto: true });
+        setStatusText(saved ? `自動保存: ${found[0]}` : `同一コードをスキップ: ${found[0]}`);
       } else {
         setStatusText(found.length > 0 ? `候補 ${found.length} 件` : "候補なし。位置を合わせ直してください。");
       }
@@ -378,6 +379,13 @@ export default function SerialReaderPrototype() {
               カメラ起動
             </button>
             <button
+              onClick={() => readSerial()}
+              disabled={status !== "ready"}
+              className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              読み取る
+            </button>
+            <button
               onClick={stopCamera}
               className="rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium"
             >
@@ -439,11 +447,11 @@ export default function SerialReaderPrototype() {
                 <div className="absolute inset-0 bg-black/25" />
 
                 <div
-                  className="absolute left-1/2 top-[68%] w-[90%] -translate-x-1/2 -translate-y-1/2 rounded-xl border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
-                  style={{ aspectRatio: "6 / 1.6" }}
+                  className="absolute left-1/2 top-[74%] w-[72%] -translate-x-1/2 -translate-y-1/2 rounded-xl border-4 border-emerald-400 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+                  style={{ aspectRatio: "6 / 1.1" }}
                 />
 
-                <div className="absolute left-1/2 top-[57%] -translate-x-1/2 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
+                <div className="absolute left-1/2 top-[64%] -translate-x-1/2 rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-semibold text-white">
                   この枠にシリアル欄を合わせる
                 </div>
               </div>
