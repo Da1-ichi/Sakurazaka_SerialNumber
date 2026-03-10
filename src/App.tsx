@@ -193,42 +193,41 @@ export default function SerialReaderPrototype() {
   }
 
   function captureGuideArea(): string | null {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return null;
-    if (!video.videoWidth || !video.videoHeight) return null;
+  const video = videoRef.current;
+  const canvas = canvasRef.current;
+  if (!video || !canvas) return null;
+  if (!video.videoWidth || !video.videoHeight) return null;
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
 
-    // 文字列部分だけを細く読む
-    // QRや枠線、小見出しをなるべく外す
-    const cropWidth = Math.floor(vw * 0.52);
-    const cropHeight = Math.floor(vh * 0.07);
-    const cropX = Math.floor(vw * 0.20);
-    const cropY = Math.floor(vh * 0.765);
+  // 細すぎたので、文字列帯＋少し余白に戻す
+  const cropWidth = Math.floor(vw * 0.64);
+  const cropHeight = Math.floor(vh * 0.11);
+  const cropX = Math.floor(vw * 0.18);
+  const cropY = Math.floor(vh * 0.73);
 
-    canvas.width = cropWidth;
-    canvas.height = cropHeight;
+  canvas.width = cropWidth;
+  canvas.height = cropHeight;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
 
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+  ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
 
-    const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
-    const data = imageData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const boosted = avg > 170 ? 255 : 0;
-      data[i] = boosted;
-      data[i + 1] = boosted;
-      data[i + 2] = boosted;
-    }
-    ctx.putImageData(imageData, 0, 0);
-
-    return canvas.toDataURL("image/png");
+  const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+    const boosted = avg > 165 ? 255 : 0;
+    data[i] = boosted;
+    data[i + 1] = boosted;
+    data[i + 2] = boosted;
   }
+  ctx.putImageData(imageData, 0, 0);
+
+  return canvas.toDataURL("image/png");
+}
 
   function saveCode(code: string, options?: { silent?: boolean; isAuto?: boolean }) {
     const trimmed = code.trim().toUpperCase();
