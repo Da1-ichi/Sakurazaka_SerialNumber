@@ -24,21 +24,29 @@ type CropSettings = {
 };
 
 const DEFAULT_CROP_SETTINGS: CropSettings = {
-  x: 0.200,
-  y: 0.500,
-  width: 0.650,
+  x: 0.2,
+  y: 0.5,
+  width: 0.65,
   height: 0.085,
   threshold: 120,
 };
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function normalizeText(text: string): string {
   return text
     .toUpperCase()
-    .replace(/[Ｏ]/g, "0")
-    .replace(/[ＩＬ]/g, "1")
-    .replace(/[Ｂ]/g, "8")
-    .replace(/[Ｓ]/g, "5")
-    .replace(/[Ｚ]/g, "2")
+    .replace(/[Ｏ]/g, "O")
+    .replace(/[Ｉ]/g, "I")
+    .replace(/[Ｌ]/g, "L")
+    .replace(/[Ｂ]/g, "B")
+    .replace(/[Ｓ]/g, "S")
+    .replace(/[Ｇ]/g, "G")
+    .replace(/[５]/g, "5")
+    .replace(/[８]/g, "8")
+    .replace(/[９]/g, "9")
     .replace(/[\s\-—_]/g, "")
     .replace(/[^A-Z0-9]/g, " ");
 }
@@ -47,12 +55,54 @@ function scoreCandidate(code: string): number {
   let score = 0;
 
   if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
-  if (code.endsWith(FIXED_SUFFIX)) score += 120;
+  if (code.endsWith(FIXED_SUFFIX)) score += 200;
   if (/\d/.test(code)) score += 10;
   if (/[A-Z]/.test(code)) score += 10;
   if (!/(.)\1{3,}/.test(code)) score += 10;
 
   return score;
+}
+
+function repairCommonMistakes(code: string): string[] {
+  const results = new Set<string>();
+  results.add(code);
+
+  const replacements: Array<[RegExp, string]> = [
+    [/B/g, "8"],
+    [/S/g, "3"],
+    [/5/g, "3"],
+    [/L/g, "1"],
+    [/G/g, "6"],
+  ];
+
+  for (const [pattern, replacement] of replacements) {
+    results.add(code.replace(pattern, replacement));
+  }
+
+  // 特に 9 の救済を強める
+  results.add(code.replace(/O/g, "9"));
+  results.add(code.replace(/0/g, "9"));
+  results.add(code.replace(/I/g, "9"));
+  results.add(code.replace(/1/g, "9"));
+
+  // 逆方向も少し残す
+  results.add(code.replace(/9/g, "0"));
+  results.add(code.replace(/9/g, "O"));
+
+  // 末尾 9V を強めに補正
+  if (code.length === 13) {
+    const chars = code.split("");
+    const secondLast = chars[11];
+    const last = chars[12];
+
+    if (["9", "0", "O", "1", "I"].includes(secondLast) && last === "V") {
+      chars[11] = "9";
+      chars[12] = "V";
+      results.add(chars.join(""));
+    }
+  }
+
+  return [...results];
 }
 
 function extractSerialCandidates(text: string): string[] {
@@ -62,16 +112,18 @@ function extractSerialCandidates(text: string): string[] {
     base,
     base
       .replace(/O/g, "0")
-      .replace(/[IL]/g, "1")
-      .replace(/Z/g, "2")
-      .replace(/S/g, "5")
-      .replace(/B/g, "8"),
+      .replace(/I/g, "1")
+      .replace(/L/g, "1")
+      .replace(/B/g, "8")
+      .replace(/S/g, "3")
+      .replace(/5/g, "3")
+      .replace(/G/g, "6"),
     base
       .replace(/0/g, "O")
       .replace(/1/g, "I")
-      .replace(/2/g, "Z")
-      .replace(/5/g, "S")
-      .replace(/8/g, "B"),
+      .replace(/8/g, "B")
+      .replace(/3/g, "S")
+      .replace(/6/g, "G"),
   ];
 
   const scored = new Map<string, number>();
@@ -79,16 +131,24 @@ function extractSerialCandidates(text: string): string[] {
   for (const normalized of variants) {
     const direct = normalized.match(SERIAL_REGEX) ?? [];
     for (const value of direct) {
-      const score = scoreCandidate(value);
-      scored.set(value, Math.max(scored.get(value) ?? 0, score));
+      for (const repaired of repairCommonMistakes(value)) {
+        if (/^[A-Z0-9]{13}$/.test(repaired)) {
+          const score = scoreCandidate(repaired);
+          scored.set(repaired, Math.max(scored.get(repaired) ?? 0, score));
+        }
+      }
     }
 
     const compact = normalized.replace(/\s+/g, "");
     for (let i = 0; i <= compact.length - 13; i += 1) {
       const chunk = compact.slice(i, i + 13);
       if (/^[A-Z0-9]{13}$/.test(chunk)) {
-        const score = scoreCandidate(chunk);
-        scored.set(chunk, Math.max(scored.get(chunk) ?? 0, score));
+        for (const repaired of repairCommonMistakes(chunk)) {
+          if (/^[A-Z0-9]{13}$/.test(repaired)) {
+            const score = scoreCandidate(repaired);
+            scored.set(repaired, Math.max(scored.get(repaired) ?? 0, score));
+          }
+        }
       }
     }
   }
@@ -100,10 +160,6 @@ function extractSerialCandidates(text: string): string[] {
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("ja-JP");
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
 }
 
 export default function SerialReaderPrototype() {
@@ -143,11 +199,11 @@ export default function SerialReaderPrototype() {
       try {
         const parsed = JSON.parse(savedCrop) as CropSettings;
         setCropSettings({
-          x: clamp(parsed.x ?? DEFAULT_CROP_SETTINGS.x, 0, 1),
-          y: clamp(parsed.y ?? DEFAULT_CROP_SETTINGS.y, 0, 1),
-          width: clamp(parsed.width ?? DEFAULT_CROP_SETTINGS.width, 0.05, 1),
-          height: clamp(parsed.height ?? DEFAULT_CROP_SETTINGS.height, 0.03, 1),
-          threshold: clamp(parsed.threshold ?? DEFAULT_CROP_SETTINGS.threshold, 0, 255),
+          x: clamp(parsed.x ?? DEFAULT_CROP_SETTINGS.x, 0, 0.95),
+          y: clamp(parsed.y ?? DEFAULT_CROP_SETTINGS.y, 0, 0.95),
+          width: clamp(parsed.width ?? DEFAULT_CROP_SETTINGS.width, 0.05, 0.95),
+          height: clamp(parsed.height ?? DEFAULT_CROP_SETTINGS.height, 0.03, 0.3),
+          threshold: clamp(parsed.threshold ?? DEFAULT_CROP_SETTINGS.threshold, 80, 240),
         });
       } catch {
         // ignore
@@ -184,16 +240,11 @@ export default function SerialReaderPrototype() {
   }, [items]);
 
   const guideStyle = useMemo(() => {
-    const left = cropSettings.x * 100;
-    const top = cropSettings.y * 100;
-    const width = cropSettings.width * 100;
-    const heightPercent = cropSettings.height * 100;
-
     return {
-      left: `${left}%`,
-      top: `${top}%`,
-      width: `${width}%`,
-      height: `${heightPercent}%`,
+      left: `${cropSettings.x * 100}%`,
+      top: `${cropSettings.y * 100}%`,
+      width: `${cropSettings.width * 100}%`,
+      height: `${cropSettings.height * 100}%`,
     };
   }, [cropSettings]);
 
@@ -271,6 +322,7 @@ export default function SerialReaderPrototype() {
 
     const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
     const data = imageData.data;
+
     for (let i = 0; i < data.length; i += 4) {
       const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
       const boosted = avg > cropSettings.threshold ? 255 : 0;
@@ -279,6 +331,18 @@ export default function SerialReaderPrototype() {
       data[i + 2] = boosted;
     }
     ctx.putImageData(imageData, 0, 0);
+
+    // OCR前に2倍拡大して太字数字を少し読みやすくする
+    const tempCanvas = document.createElement("canvas");
+    tempCanvas.width = cropWidth * 2;
+    tempCanvas.height = cropHeight * 2;
+    const tctx = tempCanvas.getContext("2d");
+
+    if (tctx) {
+      tctx.imageSmoothingEnabled = false;
+      tctx.drawImage(canvas, 0, 0, tempCanvas.width, tempCanvas.height);
+      return tempCanvas.toDataURL("image/png");
+    }
 
     return canvas.toDataURL("image/png");
   }
@@ -336,6 +400,9 @@ export default function SerialReaderPrototype() {
             );
           }
         },
+        tessedit_pageseg_mode: "7",
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        preserve_interword_spaces: "0",
       });
 
       const text = result.data.text ?? "";
