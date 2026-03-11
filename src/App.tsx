@@ -1,220 +1,71 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
 
-const SERIAL_REGEX = /[A-Z0-9]{13}/g;
-const FIXED_SUFFIX = "9V";
 const STORAGE_KEY = "serial-reader-items";
 const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
+
+const DEFAULT_CROP = {
+  x: 0.2,
+  y: 0.5,
+  width: 0.65,
+  height: 0.085,
+  threshold: 120
+};
 
 type SerialItem = {
   id: string;
   code: string;
   createdAt: string;
-  copiedAt?: string;
 };
 
-type OcrStatus = "idle" | "starting" | "ready" | "reading" | "error";
-
-type CropSettings = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  threshold: number;
-};
-
-const DEFAULT_CROP_SETTINGS: CropSettings = {
-  x: 0.2,
-  y: 0.5,
-  width: 0.65,
-  height: 0.085,
-  threshold: 120,
-};
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function normalizeText(text: string): string {
+function normalize(text: string) {
   return text
     .toUpperCase()
-    .replace(/[Ｏ]/g, "O")
-    .replace(/[Ｉ]/g, "I")
-    .replace(/[Ｌ]/g, "L")
-    .replace(/[Ｂ]/g, "B")
-    .replace(/[Ｓ]/g, "S")
-    .replace(/[Ｇ]/g, "G")
-    .replace(/[５]/g, "5")
-    .replace(/[８]/g, "8")
-    .replace(/[９]/g, "9")
-    .replace(/[\s\-—_]/g, "")
-    .replace(/[^A-Z0-9]/g, " ");
+    .replace(/B/g, "8")
+    .replace(/S/g, "3")
+    .replace(/L/g, "1")
+    .replace(/G/g, "6")
+    .replace(/[^A-Z0-9]/g, "");
 }
 
-function scoreCandidate(code: string): number {
-  let score = 0;
+function extract11(text: string) {
+  const n = normalize(text);
 
-  if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
-  if (code.endsWith(FIXED_SUFFIX)) score += 200;
-  if (/\d/.test(code)) score += 10;
-  if (/[A-Z]/.test(code)) score += 10;
-  if (!/(.)\1{3,}/.test(code)) score += 10;
-
-  return score;
-}
-
-function repairCommonMistakes(code: string): string[] {
   const results = new Set<string>();
-  results.add(code);
 
-  const replacements: Array<[RegExp, string]> = [
-    [/B/g, "8"],
-    [/S/g, "3"],
-    [/5/g, "3"],
-    [/L/g, "1"],
-    [/G/g, "6"],
-  ];
-
-  for (const [pattern, replacement] of replacements) {
-    results.add(code.replace(pattern, replacement));
-  }
-
-  // 特に 9 の救済を強める
-  results.add(code.replace(/O/g, "9"));
-  results.add(code.replace(/0/g, "9"));
-  results.add(code.replace(/I/g, "9"));
-  results.add(code.replace(/1/g, "9"));
-
-  // 逆方向も少し残す
-  results.add(code.replace(/9/g, "0"));
-  results.add(code.replace(/9/g, "O"));
-
-  // 末尾 9V を強めに補正
-  if (code.length === 13) {
-    const chars = code.split("");
-    const secondLast = chars[11];
-    const last = chars[12];
-
-    if (["9", "0", "O", "1", "I"].includes(secondLast) && last === "V") {
-      chars[11] = "9";
-      chars[12] = "V";
-      results.add(chars.join(""));
-    }
+  for (let i = 0; i <= n.length - 11; i++) {
+    const chunk = n.slice(i, i + 11);
+    if (/^[A-Z0-9]{11}$/.test(chunk)) results.add(chunk);
   }
 
   return [...results];
 }
 
-function extractSerialCandidates(text: string): string[] {
-  const base = normalizeText(text);
-
-  const variants = [
-    base,
-    base
-      .replace(/O/g, "0")
-      .replace(/I/g, "1")
-      .replace(/L/g, "1")
-      .replace(/B/g, "8")
-      .replace(/S/g, "3")
-      .replace(/5/g, "3")
-      .replace(/G/g, "6"),
-    base
-      .replace(/0/g, "O")
-      .replace(/1/g, "I")
-      .replace(/8/g, "B")
-      .replace(/3/g, "S")
-      .replace(/6/g, "G"),
-  ];
-
-  const scored = new Map<string, number>();
-
-  for (const normalized of variants) {
-    const direct = normalized.match(SERIAL_REGEX) ?? [];
-    for (const value of direct) {
-      for (const repaired of repairCommonMistakes(value)) {
-        if (/^[A-Z0-9]{13}$/.test(repaired)) {
-          const score = scoreCandidate(repaired);
-          scored.set(repaired, Math.max(scored.get(repaired) ?? 0, score));
-        }
-      }
-    }
-
-    const compact = normalized.replace(/\s+/g, "");
-    for (let i = 0; i <= compact.length - 13; i += 1) {
-      const chunk = compact.slice(i, i + 13);
-      if (/^[A-Z0-9]{13}$/.test(chunk)) {
-        for (const repaired of repairCommonMistakes(chunk)) {
-          if (/^[A-Z0-9]{13}$/.test(repaired)) {
-            const score = scoreCandidate(repaired);
-            scored.set(repaired, Math.max(scored.get(repaired) ?? 0, score));
-          }
-        }
-      }
-    }
-  }
-
-  return [...scored.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([value]) => value);
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString("ja-JP");
-}
-
-export default function SerialReaderPrototype() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+export default function App() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const autoScanTimerRef = useRef<number | null>(null);
 
-  const [status, setStatus] = useState<OcrStatus>("idle");
-  const [statusText, setStatusText] = useState("未起動");
-  const [rawText, setRawText] = useState("");
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [selectedCandidate, setSelectedCandidate] = useState("");
   const [items, setItems] = useState<SerialItem[]>([]);
-  const [copiedMessage, setCopiedMessage] = useState("");
-  const [lastSnapshot, setLastSnapshot] = useState<string>("");
-  const [autoScanEnabled, setAutoScanEnabled] = useState(false);
-  const [autoScanIntervalMs, setAutoScanIntervalMs] = useState(1200);
-  const [isAutoScanning, setIsAutoScanning] = useState(false);
-  const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
-  const [showAdjuster, setShowAdjuster] = useState(true);
-  const [cropSettings, setCropSettings] = useState<CropSettings>(DEFAULT_CROP_SETTINGS);
+  const [raw, setRaw] = useState("");
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [selected, setSelected] = useState("");
+
+  const [fixed12, setFixed12] = useState("9");
+  const [manual12, setManual12] = useState("");
+
+  const [crop, setCrop] = useState(DEFAULT_CROP);
+
+  const lastChar = "V";
+
+  const twelfth = manual12 || fixed12;
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as SerialItem[];
-        setItems(parsed);
-      } catch {
-        // ignore
-      }
-    }
+    if (saved) setItems(JSON.parse(saved));
 
     const savedCrop = localStorage.getItem(CROP_SETTINGS_KEY);
-    if (savedCrop) {
-      try {
-        const parsed = JSON.parse(savedCrop) as CropSettings;
-        setCropSettings({
-          x: clamp(parsed.x ?? DEFAULT_CROP_SETTINGS.x, 0, 0.95),
-          y: clamp(parsed.y ?? DEFAULT_CROP_SETTINGS.y, 0, 0.95),
-          width: clamp(parsed.width ?? DEFAULT_CROP_SETTINGS.width, 0.05, 0.95),
-          height: clamp(parsed.height ?? DEFAULT_CROP_SETTINGS.height, 0.03, 0.3),
-          threshold: clamp(parsed.threshold ?? DEFAULT_CROP_SETTINGS.threshold, 80, 240),
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    return () => {
-      stopCamera();
-      stopAutoScan();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (savedCrop) setCrop(JSON.parse(savedCrop));
   }, []);
 
   useEffect(() => {
@@ -222,589 +73,195 @@ export default function SerialReaderPrototype() {
   }, [items]);
 
   useEffect(() => {
-    localStorage.setItem(CROP_SETTINGS_KEY, JSON.stringify(cropSettings));
-  }, [cropSettings]);
-
-  useEffect(() => {
-    if (!copiedMessage) return;
-    const id = window.setTimeout(() => setCopiedMessage(""), 1800);
-    return () => window.clearTimeout(id);
-  }, [copiedMessage]);
-
-  const duplicateSet = useMemo(() => {
-    const count = new Map<string, number>();
-    for (const item of items) {
-      count.set(item.code, (count.get(item.code) ?? 0) + 1);
-    }
-    return new Set([...count.entries()].filter(([, v]) => v > 1).map(([k]) => k));
-  }, [items]);
-
-  const guideStyle = useMemo(() => {
-    return {
-      left: `${cropSettings.x * 100}%`,
-      top: `${cropSettings.y * 100}%`,
-      width: `${cropSettings.width * 100}%`,
-      height: `${cropSettings.height * 100}%`,
-    };
-  }, [cropSettings]);
-
-  function stopAutoScan() {
-    if (autoScanTimerRef.current !== null) {
-      window.clearTimeout(autoScanTimerRef.current);
-      autoScanTimerRef.current = null;
-    }
-    setIsAutoScanning(false);
-  }
+    localStorage.setItem(CROP_SETTINGS_KEY, JSON.stringify(crop));
+  }, [crop]);
 
   async function startCamera() {
-    try {
-      setStatus("starting");
-      setStatusText("カメラ起動中...");
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }
+    });
 
-      stopCamera();
+    streamRef.current = stream;
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-      });
-
-      streamRef.current = stream;
-      const video = videoRef.current;
-      if (!video) throw new Error("video element not found");
-
-      video.srcObject = stream;
-      await video.play();
-
-      setStatus("ready");
-      setStatusText("カメラ準備OK");
-    } catch (error) {
-      console.error(error);
-      setStatus("error");
-      setStatusText("カメラ起動失敗。HTTPS とカメラ権限を確認してください。");
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
     }
   }
 
   function stopCamera() {
-    stopAutoScan();
-    if (streamRef.current) {
-      for (const track of streamRef.current.getTracks()) {
-        track.stop();
-      }
-      streamRef.current = null;
-    }
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
   }
 
-  function captureGuideArea(): string | null {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return null;
-    if (!video.videoWidth || !video.videoHeight) return null;
+  function capture() {
+    const video = videoRef.current!;
+    const canvas = canvasRef.current!;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    const cropWidth = Math.floor(vw * cropSettings.width);
-    const cropHeight = Math.floor(vh * cropSettings.height);
-    const cropX = Math.floor(vw * cropSettings.x);
-    const cropY = Math.floor(vh * cropSettings.y);
+    const cw = vw * crop.width;
+    const ch = vh * crop.height;
 
-    canvas.width = cropWidth;
-    canvas.height = cropHeight;
+    const cx = vw * crop.x;
+    const cy = vh * crop.y;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
+    canvas.width = cw;
+    canvas.height = ch;
 
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    const ctx = canvas.getContext("2d")!;
 
-    const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
-    const data = imageData.data;
+    ctx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
 
-    for (let i = 0; i < data.length; i += 4) {
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const boosted = avg > cropSettings.threshold ? 255 : 0;
-      data[i] = boosted;
-      data[i + 1] = boosted;
-      data[i + 2] = boosted;
-    }
-    ctx.putImageData(imageData, 0, 0);
+    const img = ctx.getImageData(0, 0, cw, ch);
+    const d = img.data;
 
-    // OCR前に2倍拡大して太字数字を少し読みやすくする
-    const tempCanvas = document.createElement("canvas");
-    tempCanvas.width = cropWidth * 2;
-    tempCanvas.height = cropHeight * 2;
-    const tctx = tempCanvas.getContext("2d");
-
-    if (tctx) {
-      tctx.imageSmoothingEnabled = false;
-      tctx.drawImage(canvas, 0, 0, tempCanvas.width, tempCanvas.height);
-      return tempCanvas.toDataURL("image/png");
+    for (let i = 0; i < d.length; i += 4) {
+      const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
+      const v = avg > crop.threshold ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
     }
 
-    return canvas.toDataURL("image/png");
+    ctx.putImageData(img, 0, 0);
+
+    const scale = document.createElement("canvas");
+    scale.width = cw * 2;
+    scale.height = ch * 2;
+
+    const sctx = scale.getContext("2d")!;
+    sctx.imageSmoothingEnabled = false;
+    sctx.drawImage(canvas, 0, 0, scale.width, scale.height);
+
+    return scale.toDataURL("image/png");
   }
 
-  function saveCode(code: string, options?: { silent?: boolean; isAuto?: boolean }) {
-    const trimmed = code.trim().toUpperCase();
-    if (!trimmed) return false;
+  async function readSerial() {
+    const img = capture();
 
-    let didSave = false;
+    const Tesseract = await import("tesseract.js");
 
-    setItems((prev) => {
-      if (prev[0]?.code === trimmed) {
-        if (!options?.silent) {
-          setStatusText(`同一コードを連続保存しないようスキップ: ${trimmed}`);
-        }
-        return prev;
-      }
-
-      didSave = true;
-      return [
-        {
-          id: crypto.randomUUID(),
-          code: trimmed,
-          createdAt: new Date().toISOString(),
-        },
-        ...prev,
-      ];
+    const r = await Tesseract.recognize(img, "eng", {
+      tessedit_pageseg_mode: "7",
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     });
 
-    if (didSave && options?.isAuto) {
-      setLastAutoSavedCode(trimmed);
-    }
+    const text = r.data.text;
 
-    return didSave;
+    setRaw(text);
+
+    const found11 = extract11(text);
+
+    const final = found11.map(v => v + twelfth + lastChar);
+
+    setCandidates(final);
+    setSelected(final[0] || "");
   }
 
-  async function readSerial(options?: { autoSave?: boolean }) {
-    try {
-      setStatus("reading");
-      setStatusText(options?.autoSave ? "連続スキャン実行中..." : "OCR実行中...");
-      setRawText("");
-      setCandidates([]);
-      setSelectedCandidate("");
+  function save() {
+    if (!selected) return;
 
-      const snapshot = captureGuideArea();
-      if (!snapshot) throw new Error("capture failed");
-      setLastSnapshot(snapshot);
+    if (items[0]?.code === selected) return;
 
-      const Tesseract = await import("tesseract.js");
-      const result = await Tesseract.recognize(snapshot, "eng", {
-        logger: (m) => {
-          if (m.status === "recognizing text") {
-            setStatusText(
-              `${options?.autoSave ? "連続スキャン実行中" : "OCR実行中"}... ${Math.round((m.progress ?? 0) * 100)}%`
-            );
-          }
-        },
-        tessedit_pageseg_mode: "7",
-        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        preserve_interword_spaces: "0",
-      });
-
-      const text = result.data.text ?? "";
-      setRawText(text);
-
-      const found = extractSerialCandidates(text);
-      setCandidates(found);
-      setSelectedCandidate(found[0] ?? "");
-
-      if (options?.autoSave && found[0]) {
-        const saved = saveCode(found[0], { silent: true, isAuto: true });
-        setStatusText(saved ? `自動保存: ${found[0]}` : `同一コードをスキップ: ${found[0]}`);
-      } else {
-        setStatusText(
-          found.length > 0
-            ? `候補 ${found.length} 件（${FIXED_SUFFIX}優先）`
-            : "候補なし。位置を合わせ直してください。"
-        );
-      }
-
-      setStatus("ready");
-      return found;
-    } catch (error) {
-      console.error(error);
-      setStatus("error");
-      setStatusText("OCRに失敗しました");
-      return [] as string[];
-    }
-  }
-
-  async function runAutoScanLoop() {
-    if (!autoScanEnabled || autoScanTimerRef.current !== null || status !== "ready") return;
-    setIsAutoScanning(true);
-
-    const loop = async () => {
-      autoScanTimerRef.current = null;
-      if (!autoScanEnabled || !streamRef.current) {
-        setIsAutoScanning(false);
-        return;
-      }
-
-      const found = await readSerial({ autoSave: true });
-      const delay = found.length > 0 ? autoScanIntervalMs : Math.max(autoScanIntervalMs, 1600);
-
-      if (!autoScanEnabled || !streamRef.current) {
-        setIsAutoScanning(false);
-        return;
-      }
-
-      autoScanTimerRef.current = window.setTimeout(loop, delay);
-    };
-
-    autoScanTimerRef.current = window.setTimeout(loop, autoScanIntervalMs);
-  }
-
-  useEffect(() => {
-    if (autoScanEnabled && status === "ready" && streamRef.current) {
-      runAutoScanLoop();
-    }
-    if (!autoScanEnabled) {
-      stopAutoScan();
-    }
-
-    return () => {
-      if (!autoScanEnabled) stopAutoScan();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoScanEnabled, autoScanIntervalMs, status]);
-
-  function addSelected() {
-    if (!selectedCandidate) return;
-    const saved = saveCode(selectedCandidate);
-    if (saved) {
-      setStatusText(`保存しました: ${selectedCandidate.toUpperCase()}`);
-    }
-  }
-
-  async function copyCode(code: string) {
-    try {
-      await navigator.clipboard.writeText(code);
-      setItems((prev) =>
-        prev.map((item) =>
-          item.code === code && !item.copiedAt
-            ? { ...item, copiedAt: new Date().toISOString() }
-            : item
-        )
-      );
-      setCopiedMessage(`${code} をコピーしました`);
-    } catch (error) {
-      console.error(error);
-      setCopiedMessage("コピーに失敗しました");
-    }
-  }
-
-  async function copyAll() {
-    const text = items.map((item) => item.code).join("\n");
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedMessage("全件コピーしました");
-    } catch (error) {
-      console.error(error);
-      setCopiedMessage("一括コピーに失敗しました");
-    }
-  }
-
-  function removeItem(id: string) {
-    setItems((prev) => prev.filter((item) => item.id !== id));
-  }
-
-  function clearAll() {
-    if (!window.confirm("保存済みコードを全削除しますか？")) return;
-    setItems([]);
-    setLastAutoSavedCode("");
-  }
-
-  function resetCropSettings() {
-    setCropSettings(DEFAULT_CROP_SETTINGS);
+    setItems([
+      {
+        id: crypto.randomUUID(),
+        code: selected,
+        createdAt: new Date().toISOString()
+      },
+      ...items
+    ]);
   }
 
   return (
     <div className="app-shell">
-      <div className="app-container">
+
+      <div className="panel">
+
+        <h1>シリアル読み取り</h1>
+
+        <div className="button-row">
+          <button onClick={startCamera}>カメラ起動</button>
+          <button onClick={readSerial}>読み取る</button>
+          <button onClick={stopCamera}>停止</button>
+        </div>
+
         <div className="panel">
-          <h1 className="title">シリアル読み取り試作版</h1>
-          <p className="description">
-            カメラ映像のガイド枠を実物のコード文字列に合わせて読み取ります。
-          </p>
 
-          <div className="button-row">
-            <button onClick={startCamera} className="btn btn-primary">
-              カメラ起動
-            </button>
-            <button onClick={() => readSerial()} disabled={status !== "ready"} className="btn btn-read">
-              読み取る
-            </button>
-            <button onClick={stopCamera} className="btn btn-secondary">
-              カメラ停止
-            </button>
-            <button onClick={() => setShowAdjuster((v) => !v)} className="btn btn-secondary">
-              {showAdjuster ? "調整を隠す" : "調整を表示"}
-            </button>
-          </div>
+          <h3>12文字目</h3>
 
-          <div className="control-grid">
-            <label className="control-box">
-              <input
-                type="checkbox"
-                checked={autoScanEnabled}
-                onChange={(e) => setAutoScanEnabled(e.target.checked)}
-              />
-              <span>連続スキャン</span>
-            </label>
+          <select
+            value={fixed12}
+            onChange={e => setFixed12(e.target.value)}
+          >
+            <option value="9">9</option>
+            <option value="L">L</option>
+          </select>
 
-            <label className="control-box">
-              <span>間隔(ms)</span>
-              <input
-                type="number"
-                min={800}
-                max={5000}
-                step={100}
-                value={autoScanIntervalMs}
-                onChange={(e) => setAutoScanIntervalMs(Number(e.target.value) || 1200)}
-                className="number-input"
-              />
-            </label>
+          <input
+            placeholder="手入力"
+            maxLength={1}
+            value={manual12}
+            onChange={e => setManual12(e.target.value.toUpperCase())}
+          />
 
-            <div className="control-box">連続状態: {isAutoScanning ? "実行中" : "停止中"}</div>
-          </div>
+          <div>13文字目: V (固定)</div>
 
-          {showAdjuster && (
-            <div className="adjuster-panel">
-              <div className="adjuster-header">
-                <strong>切り抜き調整</strong>
-                <button onClick={resetCropSettings} className="btn btn-small btn-secondary" type="button">
-                  初期値に戻す
-                </button>
-              </div>
-
-              <div className="adjuster-grid">
-                <label className="slider-row">
-                  <span>X: {cropSettings.x.toFixed(3)}</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="0.8"
-                    step="0.005"
-                    value={cropSettings.x}
-                    onChange={(e) =>
-                      setCropSettings((prev) => ({
-                        ...prev,
-                        x: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="slider-row">
-                  <span>Y: {cropSettings.y.toFixed(3)}</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="0.95"
-                    step="0.005"
-                    value={cropSettings.y}
-                    onChange={(e) =>
-                      setCropSettings((prev) => ({
-                        ...prev,
-                        y: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="slider-row">
-                  <span>幅: {cropSettings.width.toFixed(3)}</span>
-                  <input
-                    type="range"
-                    min="0.1"
-                    max="0.9"
-                    step="0.005"
-                    value={cropSettings.width}
-                    onChange={(e) =>
-                      setCropSettings((prev) => ({
-                        ...prev,
-                        width: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="slider-row">
-                  <span>高さ: {cropSettings.height.toFixed(3)}</span>
-                  <input
-                    type="range"
-                    min="0.03"
-                    max="0.25"
-                    step="0.005"
-                    value={cropSettings.height}
-                    onChange={(e) =>
-                      setCropSettings((prev) => ({
-                        ...prev,
-                        height: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="slider-row">
-                  <span>しきい値: {cropSettings.threshold}</span>
-                  <input
-                    type="range"
-                    min="80"
-                    max="240"
-                    step="1"
-                    value={cropSettings.threshold}
-                    onChange={(e) =>
-                      setCropSettings((prev) => ({
-                        ...prev,
-                        threshold: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-              </div>
-            </div>
-          )}
-
-          <div className="status-box">状態: {statusText}</div>
-
-          {lastAutoSavedCode && (
-            <div className="auto-save-box">
-              直近の自動保存: <span className="mono">{lastAutoSavedCode}</span>
-            </div>
-          )}
         </div>
 
-        <div className="main-grid">
-          <div className="panel">
-            <div className="camera-frame">
-              <video ref={videoRef} playsInline muted autoPlay className="camera-video" />
+      </div>
 
-              <div className="camera-overlay">
-                <div className="camera-dim" />
-                <div className="guide-box-manual" style={guideStyle} />
-                <div className="guide-label-manual">この枠にコード文字列を合わせる</div>
-              </div>
-            </div>
+      <div className="panel">
 
-            <canvas ref={canvasRef} className="hidden-canvas" />
+        <div className="camera-frame">
 
-            <div className="preview-grid">
-              <div>
-                <h2 className="section-title">OCR生テキスト</h2>
-                <div className="preview-box">{rawText || "まだ読み取り結果はありません"}</div>
-              </div>
+          <video ref={videoRef} playsInline autoPlay />
 
-              <div>
-                <h2 className="section-title">切り出し画像</h2>
-                <div className="preview-box image-box">
-                  {lastSnapshot ? (
-                    <img src={lastSnapshot} alt="snapshot" className="snapshot-image" />
-                  ) : (
-                    <span className="muted">まだ画像はありません</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="side-column">
-            <div className="panel">
-              <h2 className="section-heading">候補</h2>
-              <div className="candidate-list">
-                {candidates.length === 0 ? (
-                  <div className="empty-box">読み取り候補はまだありません</div>
-                ) : (
-                  candidates.map((candidate) => (
-                    <label key={candidate} className="candidate-item">
-                      <input
-                        type="radio"
-                        name="candidate"
-                        checked={selectedCandidate === candidate}
-                        onChange={() => setSelectedCandidate(candidate)}
-                      />
-                      <span className="mono candidate-text">{candidate}</span>
-                    </label>
-                  ))
-                )}
-              </div>
-
-              <div className="manual-edit">
-                <div className="manual-label">手動修正</div>
-                <input
-                  type="text"
-                  value={selectedCandidate}
-                  onChange={(e) => setSelectedCandidate(e.target.value.toUpperCase())}
-                  maxLength={13}
-                  className="text-input mono"
-                  placeholder="ここで修正できます"
-                />
-              </div>
-
-              <button onClick={addSelected} disabled={!selectedCandidate} className="btn btn-save full-width">
-                選択中のコードを保存
-              </button>
-            </div>
-
-            <div className="panel">
-              <div className="panel-header">
-                <h2 className="section-heading">保存済みコード</h2>
-                <div className="small-button-row">
-                  <button onClick={copyAll} className="btn btn-small btn-secondary">
-                    全件コピー
-                  </button>
-                  <button onClick={clearAll} className="btn btn-small btn-danger">
-                    全削除
-                  </button>
-                </div>
-              </div>
-
-              {copiedMessage && <div className="copied-box">{copiedMessage}</div>}
-
-              <div className="saved-list">
-                {items.length === 0 ? (
-                  <div className="empty-box">まだ保存されていません</div>
-                ) : (
-                  items.map((item) => (
-                    <div key={item.id} className="saved-item">
-                      <div className="saved-left">
-                        <div className="mono saved-code">{item.code}</div>
-                        <div className="saved-date">登録: {formatDate(item.createdAt)}</div>
-                        {duplicateSet.has(item.code) && <div className="duplicate-text">重複あり</div>}
-                      </div>
-
-                      <div className="saved-actions">
-                        <button onClick={() => copyCode(item.code)} className="btn btn-small btn-primary">
-                          コピー
-                        </button>
-                        <button onClick={() => removeItem(item.id)} className="btn btn-small btn-secondary">
-                          削除
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
         </div>
+
+        <canvas ref={canvasRef} style={{ display: "none" }} />
+
+        <div>
+
+          <h3>OCR</h3>
+
+          <pre>{raw}</pre>
+
+        </div>
+
+        <div>
+
+          <h3>候補</h3>
+
+          {candidates.map(c => (
+            <div key={c}>
+              <input
+                type="radio"
+                checked={selected === c}
+                onChange={() => setSelected(c)}
+              />
+              {c}
+            </div>
+          ))}
+
+        </div>
+
+        <button onClick={save}>保存</button>
+
       </div>
 
-      <div className="bottom-shutter-wrap">
-        <button
-          onClick={() => readSerial()}
-          disabled={status !== "ready"}
-          aria-label="読み取る"
-          className="bottom-shutter"
-        >
-          <div className="bottom-shutter-inner" />
-        </button>
+      <div className="panel">
+
+        <h3>保存済み</h3>
+
+        {items.map(i => (
+          <div key={i.id}>
+            {i.code}
+          </div>
+        ))}
+
       </div>
+
     </div>
   );
 }
