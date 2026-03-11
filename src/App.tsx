@@ -4,6 +4,7 @@ import "./styles.css";
 const SERIAL_REGEX = /[A-Z0-9]{13}/g;
 const FIXED_SUFFIX = "9V";
 const STORAGE_KEY = "serial-reader-items";
+const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
 
 type SerialItem = {
   id: string;
@@ -13,6 +14,22 @@ type SerialItem = {
 };
 
 type OcrStatus = "idle" | "starting" | "ready" | "reading" | "error";
+
+type CropSettings = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  threshold: number;
+};
+
+const DEFAULT_CROP_SETTINGS: CropSettings = {
+  x: 0.2,
+  y: 0.7,
+  width: 0.52,
+  height: 0.085,
+  threshold: 165,
+};
 
 function normalizeText(text: string): string {
   return text
@@ -31,10 +48,8 @@ function scoreCandidate(code: string): number {
 
   if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
   if (code.endsWith(FIXED_SUFFIX)) score += 120;
-
   if (/\d/.test(code)) score += 10;
   if (/[A-Z]/.test(code)) score += 10;
-
   if (!/(.)\1{3,}/.test(code)) score += 10;
 
   return score;
@@ -87,6 +102,10 @@ function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("ja-JP");
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 export default function SerialReaderPrototype() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -105,6 +124,8 @@ export default function SerialReaderPrototype() {
   const [autoScanIntervalMs, setAutoScanIntervalMs] = useState(1200);
   const [isAutoScanning, setIsAutoScanning] = useState(false);
   const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
+  const [showAdjuster, setShowAdjuster] = useState(true);
+  const [cropSettings, setCropSettings] = useState<CropSettings>(DEFAULT_CROP_SETTINGS);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -112,6 +133,22 @@ export default function SerialReaderPrototype() {
       try {
         const parsed = JSON.parse(saved) as SerialItem[];
         setItems(parsed);
+      } catch {
+        // ignore
+      }
+    }
+
+    const savedCrop = localStorage.getItem(CROP_SETTINGS_KEY);
+    if (savedCrop) {
+      try {
+        const parsed = JSON.parse(savedCrop) as CropSettings;
+        setCropSettings({
+          x: clamp(parsed.x ?? DEFAULT_CROP_SETTINGS.x, 0, 1),
+          y: clamp(parsed.y ?? DEFAULT_CROP_SETTINGS.y, 0, 1),
+          width: clamp(parsed.width ?? DEFAULT_CROP_SETTINGS.width, 0.05, 1),
+          height: clamp(parsed.height ?? DEFAULT_CROP_SETTINGS.height, 0.03, 1),
+          threshold: clamp(parsed.threshold ?? DEFAULT_CROP_SETTINGS.threshold, 0, 255),
+        });
       } catch {
         // ignore
       }
@@ -129,6 +166,10 @@ export default function SerialReaderPrototype() {
   }, [items]);
 
   useEffect(() => {
+    localStorage.setItem(CROP_SETTINGS_KEY, JSON.stringify(cropSettings));
+  }, [cropSettings]);
+
+  useEffect(() => {
     if (!copiedMessage) return;
     const id = window.setTimeout(() => setCopiedMessage(""), 1800);
     return () => window.clearTimeout(id);
@@ -141,6 +182,20 @@ export default function SerialReaderPrototype() {
     }
     return new Set([...count.entries()].filter(([, v]) => v > 1).map(([k]) => k));
   }, [items]);
+
+  const guideStyle = useMemo(() => {
+    const left = cropSettings.x * 100;
+    const top = cropSettings.y * 100;
+    const width = cropSettings.width * 100;
+    const heightPercent = cropSettings.height * 100;
+
+    return {
+      left: `${left}%`,
+      top: `${top}%`,
+      width: `${width}%`,
+      height: `${heightPercent}%`,
+    };
+  }, [cropSettings]);
 
   function stopAutoScan() {
     if (autoScanTimerRef.current !== null) {
@@ -193,44 +248,40 @@ export default function SerialReaderPrototype() {
   }
 
   function captureGuideArea(): string | null {
-  const video = videoRef.current;
-  const canvas = canvasRef.current;
-  if (!video || !canvas) return null;
-  if (!video.videoWidth || !video.videoHeight) return null;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return null;
+    if (!video.videoWidth || !video.videoHeight) return null;
 
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
 
-  // ガイド枠の実位置に合わせる
-  // 前回は下に寄りすぎて注意書きを読んでいたので、少し上へ補正
-  const cropWidth = Math.floor(vw * 0.52);
-  const cropHeight = Math.floor(vh * 0.085);
-  const cropX = Math.floor(vw * 0.20);
-  const cropY = Math.floor(vh * 0.70);
+    const cropWidth = Math.floor(vw * cropSettings.width);
+    const cropHeight = Math.floor(vh * cropSettings.height);
+    const cropX = Math.floor(vw * cropSettings.x);
+    const cropY = Math.floor(vh * cropSettings.y);
 
-  canvas.width = cropWidth;
-  canvas.height = cropHeight;
+    canvas.width = cropWidth;
+    canvas.height = cropHeight;
 
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
 
-  ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
 
-  const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
-  const data = imageData.data;
+    const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      const boosted = avg > cropSettings.threshold ? 255 : 0;
+      data[i] = boosted;
+      data[i + 1] = boosted;
+      data[i + 2] = boosted;
+    }
+    ctx.putImageData(imageData, 0, 0);
 
-  for (let i = 0; i < data.length; i += 4) {
-    const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    const boosted = avg > 165 ? 255 : 0;
-    data[i] = boosted;
-    data[i + 1] = boosted;
-    data[i + 2] = boosted;
+    return canvas.toDataURL("image/png");
   }
-
-  ctx.putImageData(imageData, 0, 0);
-
-  return canvas.toDataURL("image/png");
-}
 
   function saveCode(code: string, options?: { silent?: boolean; isAuto?: boolean }) {
     const trimmed = code.trim().toUpperCase();
@@ -401,13 +452,17 @@ export default function SerialReaderPrototype() {
     setLastAutoSavedCode("");
   }
 
+  function resetCropSettings() {
+    setCropSettings(DEFAULT_CROP_SETTINGS);
+  }
+
   return (
     <div className="app-shell">
       <div className="app-container">
         <div className="panel">
           <h1 className="title">シリアル読み取り試作版</h1>
           <p className="description">
-            カメラ映像の中央ガイドに「シリアル文字列」を合わせて読み取ります。
+            カメラ映像のガイド枠を実物のコード文字列に合わせて読み取ります。
           </p>
 
           <div className="button-row">
@@ -419,6 +474,9 @@ export default function SerialReaderPrototype() {
             </button>
             <button onClick={stopCamera} className="btn btn-secondary">
               カメラ停止
+            </button>
+            <button onClick={() => setShowAdjuster((v) => !v)} className="btn btn-secondary">
+              {showAdjuster ? "調整を隠す" : "調整を表示"}
             </button>
           </div>
 
@@ -448,6 +506,104 @@ export default function SerialReaderPrototype() {
             <div className="control-box">連続状態: {isAutoScanning ? "実行中" : "停止中"}</div>
           </div>
 
+          {showAdjuster && (
+            <div className="adjuster-panel">
+              <div className="adjuster-header">
+                <strong>切り抜き調整</strong>
+                <button onClick={resetCropSettings} className="btn btn-small btn-secondary" type="button">
+                  初期値に戻す
+                </button>
+              </div>
+
+              <div className="adjuster-grid">
+                <label className="slider-row">
+                  <span>X: {cropSettings.x.toFixed(3)}</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.8"
+                    step="0.005"
+                    value={cropSettings.x}
+                    onChange={(e) =>
+                      setCropSettings((prev) => ({
+                        ...prev,
+                        x: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="slider-row">
+                  <span>Y: {cropSettings.y.toFixed(3)}</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.95"
+                    step="0.005"
+                    value={cropSettings.y}
+                    onChange={(e) =>
+                      setCropSettings((prev) => ({
+                        ...prev,
+                        y: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="slider-row">
+                  <span>幅: {cropSettings.width.toFixed(3)}</span>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="0.9"
+                    step="0.005"
+                    value={cropSettings.width}
+                    onChange={(e) =>
+                      setCropSettings((prev) => ({
+                        ...prev,
+                        width: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="slider-row">
+                  <span>高さ: {cropSettings.height.toFixed(3)}</span>
+                  <input
+                    type="range"
+                    min="0.03"
+                    max="0.25"
+                    step="0.005"
+                    value={cropSettings.height}
+                    onChange={(e) =>
+                      setCropSettings((prev) => ({
+                        ...prev,
+                        height: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="slider-row">
+                  <span>しきい値: {cropSettings.threshold}</span>
+                  <input
+                    type="range"
+                    min="80"
+                    max="240"
+                    step="1"
+                    value={cropSettings.threshold}
+                    onChange={(e) =>
+                      setCropSettings((prev) => ({
+                        ...prev,
+                        threshold: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+
           <div className="status-box">状態: {statusText}</div>
 
           {lastAutoSavedCode && (
@@ -464,8 +620,8 @@ export default function SerialReaderPrototype() {
 
               <div className="camera-overlay">
                 <div className="camera-dim" />
-                <div className="guide-box guide-box-tight" />
-                <div className="guide-label guide-label-tight">この枠にコード文字列を合わせる</div>
+                <div className="guide-box-manual" style={guideStyle} />
+                <div className="guide-label-manual">この枠にコード文字列を合わせる</div>
               </div>
             </div>
 
