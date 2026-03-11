@@ -24,11 +24,11 @@ type CropSettings = {
 };
 
 const DEFAULT_CROP_SETTINGS: CropSettings = {
-  x: 0.2,
-  y: 0.7,
-  width: 0.52,
+  x: 0.200,
+  y: 0.500,
+  width: 0.650,
   height: 0.085,
-  threshold: 165,
+  threshold: 120,
 };
 
 function normalizeText(text: string): string {
