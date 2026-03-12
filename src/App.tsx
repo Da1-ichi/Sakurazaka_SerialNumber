@@ -1,5 +1,4 @@
 import React, { useRef, useState } from "react";
-import Tesseract from "tesseract.js";
 import "./styles.css";
 
 const FIX_LAST = "V";
@@ -54,76 +53,78 @@ export default function App() {
   }
 
   async function readSerial() {
-    const baseCanvas = capture();
+  const baseCanvas = capture();
 
-    const w = baseCanvas.width;
-    const h = baseCanvas.height;
+  const w = baseCanvas.width;
+  const h = baseCanvas.height;
 
-    const ctx = baseCanvas.getContext("2d")!;
+  const ctx = baseCanvas.getContext("2d")!;
 
-    const cropY = h * 0.5;
-    const cropH = h * 0.08;
-    const cropX = w * 0.2;
-    const cropW = w * 0.65;
+  const cropY = h * 0.5;
+  const cropH = h * 0.08;
+  const cropX = w * 0.2;
+  const cropW = w * 0.65;
 
-    const img = ctx.getImageData(cropX, cropY, cropW, cropH);
+  const img = ctx.getImageData(cropX, cropY, cropW, cropH);
 
-    const temp = document.createElement("canvas");
-    temp.width = cropW * 3;
-    temp.height = cropH * 3;
+  const temp = document.createElement("canvas");
+  temp.width = cropW * 3;
+  temp.height = cropH * 3;
 
-    const tctx = temp.getContext("2d")!;
-    tctx.imageSmoothingEnabled = false;
+  const tctx = temp.getContext("2d")!;
+  tctx.imageSmoothingEnabled = false;
 
-    const small = document.createElement("canvas");
-    small.width = cropW;
-    small.height = cropH;
-    small.getContext("2d")!.putImageData(img, 0, 0);
+  const small = document.createElement("canvas");
+  small.width = cropW;
+  small.height = cropH;
+  small.getContext("2d")!.putImageData(img, 0, 0);
 
-    tctx.drawImage(small, 0, 0, temp.width, temp.height);
+  tctx.drawImage(small, 0, 0, temp.width, temp.height);
 
-    const charWidth = temp.width / 11;
+  const charWidth = temp.width / 11;
 
-    let result = "";
+  let result = "";
 
-    for (let i = 0; i < 11; i++) {
-      const c = document.createElement("canvas");
-      c.width = charWidth;
-      c.height = temp.height;
+  const Tesseract = await import("tesseract.js");
 
-      const cctx = c.getContext("2d")!;
-      cctx.drawImage(
-        temp,
-        i * charWidth,
-        0,
-        charWidth,
-        temp.height,
-        0,
-        0,
-        charWidth,
-        temp.height
-      );
+  for (let i = 0; i < 11; i++) {
+    const c = document.createElement("canvas");
+    c.width = charWidth;
+    c.height = temp.height;
 
-      const r = await Tesseract.recognize(c, "eng", {
-        tessedit_pageseg_mode: "10",
-        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-      });
+    const cctx = c.getContext("2d")!;
+    cctx.drawImage(
+      temp,
+      i * charWidth,
+      0,
+      charWidth,
+      temp.height,
+      0,
+      0,
+      charWidth,
+      temp.height
+    );
 
-      let ch = r.data.text.trim();
+    const r = await Tesseract.recognize(c, "eng", {
+      tessedit_pageseg_mode: "10",
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    });
 
-      if (!ch) ch = "";
+    let ch = r.data.text.trim();
 
-      ch = normalizeChar(ch[0] || "");
+    if (!ch) ch = "";
 
-      result += ch;
-    }
+    ch = normalizeChar(ch[0] || "");
 
-    setRaw(result);
-
-    const final = result + twelfth + FIX_LAST;
-
-    setCandidate(final);
+    result += ch;
   }
+
+  setRaw(result);
+
+  const final = result + twelfth + FIX_LAST;
+
+  setCandidate(final);
+}
 
   return (
     <div className="app-shell">
