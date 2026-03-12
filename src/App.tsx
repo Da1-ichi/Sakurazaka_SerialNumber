@@ -1,87 +1,38 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
+import Tesseract from "tesseract.js";
 import "./styles.css";
 
-const STORAGE_KEY = "serial-reader-items";
-const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
+const FIX_LAST = "V";
 
-const DEFAULT_CROP = {
-  x: 0.2,
-  y: 0.5,
-  width: 0.65,
-  height: 0.085,
-  threshold: 120
-};
+function normalizeChar(c: string) {
+  c = c.toUpperCase();
 
-type SerialItem = {
-  id: string;
-  code: string;
-  createdAt: string;
-};
+  if (c === "B") return "8";
+  if (c === "S") return "3";
+  if (c === "5") return "3";
+  if (c === "L") return "1";
+  if (c === "G") return "6";
+  if (c === "O") return "0";
 
-function normalize(text: string) {
-  return text
-    .toUpperCase()
-    .replace(/B/g, "8")
-    .replace(/S/g, "3")
-    .replace(/L/g, "1")
-    .replace(/G/g, "6")
-    .replace(/[^A-Z0-9]/g, "");
-}
-
-function extract11(text: string) {
-  const n = normalize(text);
-
-  const results = new Set<string>();
-
-  for (let i = 0; i <= n.length - 11; i++) {
-    const chunk = n.slice(i, i + 11);
-    if (/^[A-Z0-9]{11}$/.test(chunk)) results.add(chunk);
-  }
-
-  return [...results];
+  return c;
 }
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
 
-  const [items, setItems] = useState<SerialItem[]>([]);
   const [raw, setRaw] = useState("");
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [selected, setSelected] = useState("");
+  const [candidate, setCandidate] = useState("");
 
-  const [fixed12, setFixed12] = useState("9");
+  const [char12, setChar12] = useState("9");
   const [manual12, setManual12] = useState("");
 
-  const [crop, setCrop] = useState(DEFAULT_CROP);
-
-  const lastChar = "V";
-
-  const twelfth = manual12 || fixed12;
-
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) setItems(JSON.parse(saved));
-
-    const savedCrop = localStorage.getItem(CROP_SETTINGS_KEY);
-    if (savedCrop) setCrop(JSON.parse(savedCrop));
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  }, [items]);
-
-  useEffect(() => {
-    localStorage.setItem(CROP_SETTINGS_KEY, JSON.stringify(crop));
-  }, [crop]);
+  const twelfth = manual12 || char12;
 
   async function startCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" }
     });
-
-    streamRef.current = stream;
 
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -89,176 +40,137 @@ export default function App() {
     }
   }
 
-  function stopCamera() {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  }
-
   function capture() {
     const video = videoRef.current!;
     const canvas = canvasRef.current!;
-
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-
-    const cw = vw * crop.width;
-    const ch = vh * crop.height;
-
-    const cx = vw * crop.x;
-    const cy = vh * crop.y;
-
-    canvas.width = cw;
-    canvas.height = ch;
-
     const ctx = canvas.getContext("2d")!;
 
-    ctx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-    const img = ctx.getImageData(0, 0, cw, ch);
-    const d = img.data;
+    ctx.drawImage(video, 0, 0);
 
-    for (let i = 0; i < d.length; i += 4) {
-      const avg = (d[i] + d[i + 1] + d[i + 2]) / 3;
-      const v = avg > crop.threshold ? 255 : 0;
-      d[i] = d[i + 1] = d[i + 2] = v;
-    }
-
-    ctx.putImageData(img, 0, 0);
-
-    const scale = document.createElement("canvas");
-    scale.width = cw * 2;
-    scale.height = ch * 2;
-
-    const sctx = scale.getContext("2d")!;
-    sctx.imageSmoothingEnabled = false;
-    sctx.drawImage(canvas, 0, 0, scale.width, scale.height);
-
-    return scale.toDataURL("image/png");
+    return canvas;
   }
 
   async function readSerial() {
-    const img = capture();
+    const baseCanvas = capture();
 
-    const Tesseract = await import("tesseract.js");
+    const w = baseCanvas.width;
+    const h = baseCanvas.height;
 
-    const r = await Tesseract.recognize(img, "eng", {
-      tessedit_pageseg_mode: "7",
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    });
+    const ctx = baseCanvas.getContext("2d")!;
 
-    const text = r.data.text;
+    const cropY = h * 0.5;
+    const cropH = h * 0.08;
+    const cropX = w * 0.2;
+    const cropW = w * 0.65;
 
-    setRaw(text);
+    const img = ctx.getImageData(cropX, cropY, cropW, cropH);
 
-    const found11 = extract11(text);
+    const temp = document.createElement("canvas");
+    temp.width = cropW * 3;
+    temp.height = cropH * 3;
 
-    const final = found11.map(v => v + twelfth + lastChar);
+    const tctx = temp.getContext("2d")!;
+    tctx.imageSmoothingEnabled = false;
 
-    setCandidates(final);
-    setSelected(final[0] || "");
-  }
+    const small = document.createElement("canvas");
+    small.width = cropW;
+    small.height = cropH;
+    small.getContext("2d")!.putImageData(img, 0, 0);
 
-  function save() {
-    if (!selected) return;
+    tctx.drawImage(small, 0, 0, temp.width, temp.height);
 
-    if (items[0]?.code === selected) return;
+    const charWidth = temp.width / 11;
 
-    setItems([
-      {
-        id: crypto.randomUUID(),
-        code: selected,
-        createdAt: new Date().toISOString()
-      },
-      ...items
-    ]);
+    let result = "";
+
+    for (let i = 0; i < 11; i++) {
+      const c = document.createElement("canvas");
+      c.width = charWidth;
+      c.height = temp.height;
+
+      const cctx = c.getContext("2d")!;
+      cctx.drawImage(
+        temp,
+        i * charWidth,
+        0,
+        charWidth,
+        temp.height,
+        0,
+        0,
+        charWidth,
+        temp.height
+      );
+
+      const r = await Tesseract.recognize(c, "eng", {
+        tessedit_pageseg_mode: "10",
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      });
+
+      let ch = r.data.text.trim();
+
+      if (!ch) ch = "";
+
+      ch = normalizeChar(ch[0] || "");
+
+      result += ch;
+    }
+
+    setRaw(result);
+
+    const final = result + twelfth + FIX_LAST;
+
+    setCandidate(final);
   }
 
   return (
     <div className="app-shell">
 
-      <div className="panel">
+      <h1>シリアルスキャナ</h1>
 
-        <h1>シリアル読み取り</h1>
+      <div>
+        <button onClick={startCamera}>カメラ起動</button>
+        <button onClick={readSerial}>読み取る</button>
+      </div>
 
-        <div className="button-row">
-          <button onClick={startCamera}>カメラ起動</button>
-          <button onClick={readSerial}>読み取る</button>
-          <button onClick={stopCamera}>停止</button>
-        </div>
+      <video ref={videoRef} autoPlay playsInline />
 
-        <div className="panel">
+      <canvas ref={canvasRef} style={{ display: "none" }} />
 
-          <h3>12文字目</h3>
+      <div>
 
-          <select
-            value={fixed12}
-            onChange={e => setFixed12(e.target.value)}
-          >
-            <option value="9">9</option>
-            <option value="L">L</option>
-          </select>
+        <h3>OCR結果（11文字）</h3>
 
-          <input
-            placeholder="手入力"
-            maxLength={1}
-            value={manual12}
-            onChange={e => setManual12(e.target.value.toUpperCase())}
-          />
+        <div>{raw}</div>
 
-          <div>13文字目: V (固定)</div>
+        <h3>最終コード</h3>
 
-        </div>
+        <div>{candidate}</div>
 
       </div>
 
-      <div className="panel">
+      <div>
 
-        <div className="camera-frame">
+        <h3>12文字目</h3>
 
-          <video ref={videoRef} playsInline autoPlay />
+        <select
+          value={char12}
+          onChange={e => setChar12(e.target.value)}
+        >
+          <option value="9">9</option>
+          <option value="L">L</option>
+        </select>
 
-        </div>
+        <input
+          placeholder="手入力"
+          maxLength={1}
+          value={manual12}
+          onChange={e => setManual12(e.target.value.toUpperCase())}
+        />
 
-        <canvas ref={canvasRef} style={{ display: "none" }} />
-
-        <div>
-
-          <h3>OCR</h3>
-
-          <pre>{raw}</pre>
-
-        </div>
-
-        <div>
-
-          <h3>候補</h3>
-
-          {candidates.map(c => (
-            <div key={c}>
-              <input
-                type="radio"
-                checked={selected === c}
-                onChange={() => setSelected(c)}
-              />
-              {c}
-            </div>
-          ))}
-
-        </div>
-
-        <button onClick={save}>保存</button>
-
-      </div>
-
-      <div className="panel">
-
-        <h3>保存済み</h3>
-
-        {items.map(i => (
-          <div key={i.id}>
-            {i.code}
-          </div>
-        ))}
+        <div>13文字目: V 固定</div>
 
       </div>
 
