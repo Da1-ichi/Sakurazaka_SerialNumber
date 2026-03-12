@@ -105,10 +105,12 @@ export default function App() {
       temp.height
     );
 
-    const r = await Tesseract.recognize(c, "eng", {
-      tessedit_pageseg_mode: "10",
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    });
+    const Tesseract = await import("tesseract.js");
+
+const r = await Tesseract.recognize(c, "eng", {
+  tessedit_pageseg_mode: "10",
+  tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+});
 
     let ch = r.data.text.trim();
 
