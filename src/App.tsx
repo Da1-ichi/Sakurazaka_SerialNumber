@@ -126,6 +126,9 @@ export default function SerialReaderPrototype() {
   const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
   const [showAdjuster, setShowAdjuster] = useState(true);
   const [cropSettings, setCropSettings] = useState<CropSettings>(DEFAULT_CROP_SETTINGS);
+  const [targetUrl, setTargetUrl] = useState(
+  "https://ticket.fortunemeets.app/sakurazaka46/14th#/"
+);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -430,6 +433,33 @@ export default function SerialReaderPrototype() {
     }
   }
 
+  async function handleSaveAndAction(code: string) {
+  const trimmed = code.trim().toUpperCase();
+  if (!trimmed) return;
+
+  // ① 保存（既存ロジック流用）
+  setItems((prev) => [
+    {
+      id: crypto.randomUUID(),
+      code: trimmed,
+      createdAt: new Date().toISOString(),
+    },
+    ...prev,
+  ]);
+
+  try {
+    // ② コピー
+    await navigator.clipboard.writeText(trimmed);
+    setCopiedMessage(`${trimmed} をコピーしました`);
+
+    // ③ ページ遷移
+    window.open(targetUrl, "_blank");
+  } catch (e) {
+    console.error(e);
+    setCopiedMessage("コピーまたは遷移に失敗");
+  }
+}
+
   async function copyAll() {
     const text = items.map((item) => item.code).join("\n");
     if (!text) return;
@@ -505,6 +535,16 @@ export default function SerialReaderPrototype() {
 
             <div className="control-box">連続状態: {isAutoScanning ? "実行中" : "停止中"}</div>
           </div>
+
+          <div className="control-box">
+  <span>遷移URL</span>
+  <input
+    type="text"
+    value={targetUrl}
+    onChange={(e) => setTargetUrl(e.target.value)}
+    className="text-input"
+  />
+</div>
 
           {showAdjuster && (
             <div className="adjuster-panel">
@@ -679,9 +719,13 @@ export default function SerialReaderPrototype() {
                 />
               </div>
 
-              <button onClick={addSelected} disabled={!selectedCandidate} className="btn btn-save full-width">
-                選択中のコードを保存
-              </button>
+              <button
+              onClick={() => handleSaveAndAction(selectedCandidate)}
+  disabled={!selectedCandidate}
+  className="btn btn-save full-width"
+>
+  保存してコピー＋遷移
+</button>
             </div>
 
             <div className="panel">
