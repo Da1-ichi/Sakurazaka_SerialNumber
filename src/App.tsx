@@ -2,9 +2,19 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
 
 const SERIAL_REGEX = /[A-Z0-9]{13}/g;
-const FIXED_SUFFIX = "9V";
+const FIXED_SUFFIX = "V";
+/** シングルごとに変わる末尾パターン（将来 UI で可変にする想定） */
+const CURRENT_SINGLE_SUFFIX = "9V";
 const STORAGE_KEY = "serial-reader-items";
 const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
+
+/**
+ * 実物のシリアル番号で使われている文字セット:
+ *   数字: 3 4 5 6 7 8 9  （0, 1, 2 は未使用）
+ *   英字: A-H, J-N, P-Z  （I, O は未使用）
+ * 混同を避けるため 0/O, 1/I/L, 2/Z を排除したフォーマット。
+ */
+const VALID_CHARS = new Set("3456789ABCDEFGHJKLMNPQRSTUVWXYZ".split(""));
 
 type SerialItem = {
   id: string;
@@ -31,58 +41,98 @@ const DEFAULT_CROP_SETTINGS: CropSettings = {
   threshold: 120,
 };
 
+/**
+ * OCR の誤認識を補正する。
+ * 実物解析の結果、このシリアルでは 0, 1, 2, I, O が一切使われないため
+ * それらを最も形状が近い有効文字に確定変換できる。
+ */
 function normalizeText(text: string): string {
   return text
     .toUpperCase()
-    .replace(/[Ｏ]/g, "0")
-    .replace(/[ＩＬ]/g, "1")
-    .replace(/[Ｂ]/g, "8")
-    .replace(/[Ｓ]/g, "5")
-    .replace(/[Ｚ]/g, "2")
-    .replace(/[\s\-—_]/g, "")
+    // --- 全角英数 → 半角 ---
+    .replace(/[Ａ-Ｚ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    // --- OCR 頻出の記号誤認識 ---
+    .replace(/[$(]/g, "S")
+    .replace(/[!|]/g, "L")       // | → L（1 は無効文字なので L）
+    .replace(/[{}[\]]/g, "")
+    .replace(/[#]/g, "H")
+    .replace(/[@]/g, "A")
+    .replace(/[&]/g, "8")
+    // --- 無効文字の確定変換（0,1,2,I,O はシリアルに存在しない） ---
+    .replace(/0/g, "D")          // 0 → D（丸い形、Q も候補だが D の方が頻出）
+    .replace(/1/g, "L")          // 1 → L（細い縦線）
+    .replace(/2/g, "Z")          // 2 → Z（形状が近い）
+    .replace(/O/g, "D")          // O → D
+    .replace(/I/g, "J")          // I → J（縦線、J の方が近い）
+    // --- 空白・区切り文字を除去 ---
+    .replace(/[\s\-—_\.,:;'"`~]/g, "")
+    // --- 英数字以外 → スペース ---
     .replace(/[^A-Z0-9]/g, " ");
 }
 
 function scoreCandidate(code: string): number {
   let score = 0;
 
+  // 基本: 13 桁の英数字
   if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
-  if (code.endsWith(FIXED_SUFFIX)) score += 120;
+
+  // 末尾 "V" 一致（歴代シングル共通）
+  if (code.endsWith(FIXED_SUFFIX)) score += 80;
+
+  // 末尾 "9V" 一致（今回のシングル固有）
+  if (code.endsWith(CURRENT_SINGLE_SUFFIX)) score += 100;
+
+  // 有効文字セットのみで構成されているか（0,1,2,I,O を含まない）
+  const allValid = [...code].every((ch) => VALID_CHARS.has(ch));
+  if (allValid) score += 80;
+
+  // 数字とアルファベットが混在している
   if (/\d/.test(code)) score += 10;
   if (/[A-Z]/.test(code)) score += 10;
+
+  // 同じ文字が4連続以上は不自然
   if (!/(.)\1{3,}/.test(code)) score += 10;
 
   return score;
 }
 
+/**
+ * OCR テキストから 13 桁のシリアル候補を抽出する。
+ * 主な誤認識パターン（実測データ）に基づいてバリアントを生成し、
+ * スコアリングで最も確からしい候補を上位に出す。
+ *
+ * 実測の主な誤認識:
+ *   9 ↔ S (最頻出), 5 ↔ S, 8 ↔ B, F ↔ E, 9 ↔ G
+ */
 function extractSerialCandidates(text: string): string[] {
   const base = normalizeText(text);
 
-  const variants = [
-    base,
-    base
-      .replace(/O/g, "0")
-      .replace(/[IL]/g, "1")
-      .replace(/Z/g, "2")
-      .replace(/S/g, "5")
-      .replace(/B/g, "8"),
-    base
-      .replace(/0/g, "O")
-      .replace(/1/g, "I")
-      .replace(/2/g, "Z")
-      .replace(/5/g, "S")
-      .replace(/8/g, "B"),
-  ];
+  // 実測データに基づく誤認識バリアント
+  // バリアント1: S→5 (S が 5 の誤読だった場合を補正)
+  const variant_S5 = base.replace(/S/g, "5");
+  // バリアント2: S→9
+  const variant_S9 = base.replace(/S/g, "9");
+  // バリアント3: B→8
+  const variant_B8 = base.replace(/B/g, "8");
+  // バリアント4: E→F
+  const variant_EF = base.replace(/E/g, "F");
+  // バリアント5: 末尾付近の S を 9 に（末尾 9V のため特に重要）
+  const variant_tail = base.replace(/S(V\s*$|V\s)/g, "9$1");
+
+  const variants = [base, variant_S5, variant_S9, variant_B8, variant_EF, variant_tail];
 
   const scored = new Map<string, number>();
 
   for (const normalized of variants) {
+    // 正規表現で直接マッチ
     const direct = normalized.match(SERIAL_REGEX) ?? [];
     for (const value of direct) {
       const score = scoreCandidate(value);
       scored.set(value, Math.max(scored.get(value) ?? 0, score));
     }
 
+    // 空白を詰めてスライディングウィンドウ
     const compact = normalized.replace(/\s+/g, "");
     for (let i = 0; i <= compact.length - 13; i += 1) {
       const chunk = compact.slice(i, i + 13);
@@ -91,6 +141,33 @@ function extractSerialCandidates(text: string): string[] {
         scored.set(chunk, Math.max(scored.get(chunk) ?? 0, score));
       }
     }
+  }
+
+  // 各候補に対して、末尾を "9V" に補正した追加候補も生成
+  const extras = new Map<string, number>();
+  for (const [code, _score] of scored) {
+    // 末尾が SV → 9V に補正
+    if (code.endsWith("SV")) {
+      const fixed = code.slice(0, -2) + "9V";
+      const fixedScore = scoreCandidate(fixed);
+      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
+    }
+    // 末尾が GV → 9V に補正
+    if (code.endsWith("GV")) {
+      const fixed = code.slice(0, -2) + "9V";
+      const fixedScore = scoreCandidate(fixed);
+      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
+    }
+    // 末尾が 99 → 9V に補正（V→9 誤読）
+    if (code.endsWith("99")) {
+      const fixed = code.slice(0, -1) + "V";
+      const fixedScore = scoreCandidate(fixed);
+      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
+    }
+  }
+
+  for (const [code, score] of extras) {
+    scored.set(code, Math.max(scored.get(code) ?? 0, score));
   }
 
   return [...scored.entries()]
@@ -339,6 +416,10 @@ export default function SerialReaderPrototype() {
             );
           }
         },
+        // PSM 7 = 1行テキスト想定。ガイド枠でシリアル1行に絞っている前提
+        // 文字ホワイトリストで 0,1,2,I,O を除外し誤認識を減らす
+        tessedit_pageseg_mode: "7",
+        tessedit_char_whitelist: "3456789ABCDEFGHJKLMNPQRSTUVWXYZ",
       });
 
       const text = result.data.text ?? "";
@@ -354,7 +435,7 @@ export default function SerialReaderPrototype() {
       } else {
         setStatusText(
           found.length > 0
-            ? `候補 ${found.length} 件（${FIXED_SUFFIX}優先）`
+            ? `候補 ${found.length} 件（末尾${FIXED_SUFFIX}優先）`
             : "候補なし。位置を合わせ直してください。"
         );
       }
