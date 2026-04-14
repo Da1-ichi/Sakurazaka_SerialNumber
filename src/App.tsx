@@ -188,6 +188,8 @@ export default function SerialReaderPrototype() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const autoScanTimerRef = useRef<number | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ocrWorkerRef = useRef<any>(null);
 
   const [status, setStatus] = useState<OcrStatus>("idle");
   const [statusText, setStatusText] = useState("未起動");
@@ -237,6 +239,10 @@ export default function SerialReaderPrototype() {
     return () => {
       stopCamera();
       stopAutoScan();
+      if (ocrWorkerRef.current) {
+        ocrWorkerRef.current.terminate();
+        ocrWorkerRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -408,19 +414,29 @@ export default function SerialReaderPrototype() {
       setLastSnapshot(snapshot);
 
       const Tesseract = await import("tesseract.js");
-      const result = await Tesseract.recognize(snapshot, "eng", {
-        logger: (m) => {
-          if (m.status === "recognizing text") {
-            setStatusText(
-              `${options?.autoSave ? "連続スキャン実行中" : "OCR実行中"}... ${Math.round((m.progress ?? 0) * 100)}%`
-            );
-          }
-        },
+
+      // Worker を初回だけ作成し、以降は再利用する
+      if (!ocrWorkerRef.current) {
+        const worker = await Tesseract.createWorker("eng", undefined, {
+          logger: (m: { status: string; progress?: number }) => {
+            if (m.status === "recognizing text") {
+              setStatusText(
+                `OCR実行中... ${Math.round((m.progress ?? 0) * 100)}%`
+              );
+            }
+          },
+        });
         // PSM 7 = 1行テキスト想定。ガイド枠でシリアル1行に絞っている前提
         // 文字ホワイトリストで 0,1,2,I,O を除外し誤認識を減らす
-        tessedit_pageseg_mode: "7",
-        tessedit_char_whitelist: "3456789ABCDEFGHJKLMNPQRSTUVWXYZ",
-      });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (worker as any).setParameters({
+          tessedit_pageseg_mode: "7",
+          tessedit_char_whitelist: "3456789ABCDEFGHJKLMNPQRSTUVWXYZ",
+        });
+        ocrWorkerRef.current = worker;
+      }
+
+      const result = await ocrWorkerRef.current.recognize(snapshot);
 
       const text = result.data.text ?? "";
       setRawText(text);
