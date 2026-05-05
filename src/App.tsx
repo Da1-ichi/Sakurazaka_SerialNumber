@@ -583,6 +583,8 @@ export default function SerialReaderPrototype() {
     setCropSettings(DEFAULT_CROP_SETTINGS);
   }
 
+const BOOKMARKLET_CODE = `javascript:void(async function(){try{var t=await navigator.clipboard.readText();if(!t){alert("クリップボードが空です");return}var s=t.split("\\n").map(function(s){return s.trim()}).filter(function(s){return /^[A-Z0-9]{13}$/.test(s)}).slice(0,10);if(s.length===0){alert("有効なシリアルが見つかりませんでした");return}var inputs=Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).filter(function(el){var st=getComputedStyle(el);return st.display!=="none"&&st.visibility!=="hidden"&&el.offsetParent!==null});if(inputs.length===0){alert("入力欄が見つかりませんでした");return}var f=0;for(var i=0;i<s.length&&i<inputs.length;i++){var inp=inputs[i];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set.call(inp,s[i]);inp.dispatchEvent(new Event("input",{bubbles:true}));inp.dispatchEvent(new Event("change",{bubbles:true}));f++}alert(f+"件入力しました")}catch(e){alert("失敗しました: "+e.message)}}())`;
+  
   return (
     <div className="app-shell">
       <div className="app-container">
@@ -832,20 +834,28 @@ export default function SerialReaderPrototype() {
               </button>
             </div>
 
-<div className="panel">
+<div className="panel" style={{ marginTop: 16 }}>
   <h2 className="section-heading">ブックマークレット</h2>
-  <p className="bookmarklet-desc">
-    応募ページで使います。下のリンクをブックマークバーにドラッグしてください。
-    <br />
+  <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.6, margin: "8px 0 16px" }}>
     先に「全件コピー」→ 応募ページでブックマークレットを実行すると、
     クリップボードのシリアルを最大10件まで入力欄に自動入力します。
   </p>
 
-  <div className="bookmarklet-link-wrap">
+  <div style={{ background: "#f8fafc", borderRadius: 16, padding: 16, textAlign: "center" }}>
     
-      className="bookmarklet-link"
-      href={`javascript:(async()=>{try{const t=await navigator.clipboard.readText();if(!t){alert('クリップボードが空です');return}const s=t.split('\\n').map(s=>s.trim()).filter(s=>/^[A-Z0-9]{13}$/.test(s)).slice(0,10);if(s.length===0){alert('有効なシリアルが見つかりませんでした');return}const inputs=Array.from(document.querySelectorAll('input[type=\"text\"],input:not([type])')).filter(el=>{const st=getComputedStyle(el);return st.display!=='none'&&st.visibility!=='hidden'&&el.offsetParent!==null});if(inputs.length===0){alert('入力欄が見つかりませんでした');return}let f=0;for(let i=0;i<s.length&&i<inputs.length;i++){const inp=inputs[i];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(inp,s[i]);inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));f++}alert(f+'件入力しました')}catch(e){alert('失敗しました: '+e.message)}})()`}
+      href={BOOKMARKLET_CODE}
       onClick={(e) => e.preventDefault()}
+      style={{
+        display: "inline-block",
+        background: "#7c3aed",
+        color: "#fff",
+        fontWeight: 700,
+        fontSize: 15,
+        padding: "12px 24px",
+        borderRadius: 16,
+        textDecoration: "none",
+        cursor: "grab",
+      }}
     >
       シリアル一括入力
     </a>
@@ -855,11 +865,10 @@ export default function SerialReaderPrototype() {
     className="btn btn-small btn-secondary full-width"
     style={{ marginTop: 12 }}
     onClick={() => {
-      const code = `javascript:(async()=>{try{const t=await navigator.clipboard.readText();if(!t){alert('クリップボードが空です');return}const s=t.split('\\n').map(s=>s.trim()).filter(s=>/^[A-Z0-9]{13}$/.test(s)).slice(0,10);if(s.length===0){alert('有効なシリアルが見つかりませんでした');return}const inputs=Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).filter(el=>{const st=getComputedStyle(el);return st.display!=='none'&&st.visibility!=='hidden'&&el.offsetParent!==null});if(inputs.length===0){alert('入力欄が見つかりませんでした');return}let f=0;for(let i=0;i<s.length&&i<inputs.length;i++){const inp=inputs[i];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(inp,s[i]);inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));f++}alert(f+'件入力しました')}catch(e){alert('失敗しました: '+e.message)}})()`;
-      navigator.clipboard.writeText(code).then(() => {
-        alert('ブックマークレットをコピーしました。\nブラウザのブックマークに新規追加し、URL欄に貼り付けてください。');
+      navigator.clipboard.writeText(BOOKMARKLET_CODE).then(() => {
+        alert("ブックマークレットをコピーしました。\nブラウザのブックマークに新規追加し、URL欄に貼り付けてください。");
       }).catch(() => {
-        prompt('以下をコピーしてブックマークのURLに貼り付けてください:', code);
+        window.prompt("以下をコピーしてブックマークのURLに貼り付けてください:", BOOKMARKLET_CODE);
       });
     }}
   >
