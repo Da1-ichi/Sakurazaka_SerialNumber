@@ -559,16 +559,16 @@ export default function SerialReaderPrototype() {
   }
 
   async function copyAll() {
-    const text = items.map((item) => item.code).join("\n");
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedMessage("全件コピーしました");
-    } catch (error) {
-      console.error(error);
-      setCopiedMessage("一括コピーに失敗しました");
-    }
+  const text = items.map((item) => item.code).join("\n\n");
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    setCopiedMessage("全件コピーしました");
+  } catch (error) {
+    console.error(error);
+    setCopiedMessage("一括コピーに失敗しました");
   }
+}
 
   function removeItem(id: string) {
     setItems((prev) => prev.filter((item) => item.id !== id));
