@@ -847,13 +847,6 @@ const BOOKMARKLET_CODE = [
               >
                 保存
               </button>
-
-              <button
-                onClick={() => window.open(targetUrl, "_blank")}
-                className="btn btn-secondary full-width"
-              >
-                応募ページを開く
-              </button>
             </div>
 
 <div className="panel" style={{ marginTop: 16 }}>
@@ -957,9 +950,16 @@ const BOOKMARKLET_CODE = [
     </div>
   )}
 </div>
-            
             <div className="panel">
               <div className="panel-header">
+                <button
+                onClick={() => window.open(targetUrl, "_blank")}
+                disabled={items.length === 0}
+                className="btn btn-primary full-width"
+              　>
+                応募ページを開く
+              </button>
+                
                 <h2 className="section-heading">保存済みコード</h2>
                 <div className="small-button-row">
                   <button onClick={copyAll} className="btn btn-small btn-secondary">
