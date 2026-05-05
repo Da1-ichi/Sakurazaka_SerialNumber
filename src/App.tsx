@@ -591,7 +591,7 @@ const BOOKMARKLET_CODE = [
   'try{text=await navigator.clipboard.readText()}',
   'catch(e){text=window.prompt("シリアルを貼り付けてください（改行区切り）")}',
   'if(!text){alert("入力がありません");return}',
-  'var serials=text.split("\\n").map(function(s){return s.trim()}).filter(function(s){return /^[A-Z0-9]{13}$/.test(s)}).slice(0,10);',
+  'var serials=text.split(/[\\n\\s,;]+/).map(function(s){return s.trim()}).filter(function(s){return /^[A-Z0-9]{13}$/.test(s)}).slice(0,10);',
   'if(serials.length===0){alert("有効なシリアルが見つかりませんでした");return}',
   'var inputs=Array.from(document.querySelectorAll(\'input[type="text"],input:not([type])\')).filter(function(el){var st=getComputedStyle(el);return st.display!=="none"&&st.visibility!=="hidden"&&el.offsetParent!==null});',
   'if(inputs.length===0){alert("入力欄が見つかりませんでした");return}',
