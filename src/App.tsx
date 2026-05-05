@@ -842,8 +842,7 @@ const BOOKMARKLET_CODE = `javascript:void(async function(){try{var t=await navig
   </p>
 
   <div style={{ background: "#f8fafc", borderRadius: 16, padding: 16, textAlign: "center" }}>
-    
-      href={BOOKMARKLET_CODE}
+    <a href={BOOKMARKLET_CODE}
       onClick={(e) => e.preventDefault()}
       style={{
         display: "inline-block",
