@@ -956,7 +956,7 @@ const BOOKMARKLET_CODE = [
                 <button
                 onClick={() => window.open(targetUrl, "_blank")}
                 disabled={items.length === 0}
-                className="btn btn-primary full-width"
+                className="btn btn-secondary full-width"
               　>
                 応募ページを開く
               </button>
