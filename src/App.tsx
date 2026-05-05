@@ -832,6 +832,41 @@ export default function SerialReaderPrototype() {
               </button>
             </div>
 
+<div className="panel">
+  <h2 className="section-heading">ブックマークレット</h2>
+  <p className="bookmarklet-desc">
+    応募ページで使います。下のリンクをブックマークバーにドラッグしてください。
+    <br />
+    先に「全件コピー」→ 応募ページでブックマークレットを実行すると、
+    クリップボードのシリアルを最大10件まで入力欄に自動入力します。
+  </p>
+
+  <div className="bookmarklet-link-wrap">
+    
+      className="bookmarklet-link"
+      href={`javascript:(async()=>{try{const t=await navigator.clipboard.readText();if(!t){alert('クリップボードが空です');return}const s=t.split('\\n').map(s=>s.trim()).filter(s=>/^[A-Z0-9]{13}$/.test(s)).slice(0,10);if(s.length===0){alert('有効なシリアルが見つかりませんでした');return}const inputs=Array.from(document.querySelectorAll('input[type=\"text\"],input:not([type])')).filter(el=>{const st=getComputedStyle(el);return st.display!=='none'&&st.visibility!=='hidden'&&el.offsetParent!==null});if(inputs.length===0){alert('入力欄が見つかりませんでした');return}let f=0;for(let i=0;i<s.length&&i<inputs.length;i++){const inp=inputs[i];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(inp,s[i]);inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));f++}alert(f+'件入力しました')}catch(e){alert('失敗しました: '+e.message)}})()`}
+      onClick={(e) => e.preventDefault()}
+    >
+      シリアル一括入力
+    </a>
+  </div>
+
+  <button
+    className="btn btn-small btn-secondary full-width"
+    style={{ marginTop: 12 }}
+    onClick={() => {
+      const code = `javascript:(async()=>{try{const t=await navigator.clipboard.readText();if(!t){alert('クリップボードが空です');return}const s=t.split('\\n').map(s=>s.trim()).filter(s=>/^[A-Z0-9]{13}$/.test(s)).slice(0,10);if(s.length===0){alert('有効なシリアルが見つかりませんでした');return}const inputs=Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).filter(el=>{const st=getComputedStyle(el);return st.display!=='none'&&st.visibility!=='hidden'&&el.offsetParent!==null});if(inputs.length===0){alert('入力欄が見つかりませんでした');return}let f=0;for(let i=0;i<s.length&&i<inputs.length;i++){const inp=inputs[i];Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set.call(inp,s[i]);inp.dispatchEvent(new Event('input',{bubbles:true}));inp.dispatchEvent(new Event('change',{bubbles:true}));f++}alert(f+'件入力しました')}catch(e){alert('失敗しました: '+e.message)}})()`;
+      navigator.clipboard.writeText(code).then(() => {
+        alert('ブックマークレットをコピーしました。\nブラウザのブックマークに新規追加し、URL欄に貼り付けてください。');
+      }).catch(() => {
+        prompt('以下をコピーしてブックマークのURLに貼り付けてください:', code);
+      });
+    }}
+  >
+    コードをコピー（スマホ用）
+  </button>
+</div>
+            
             <div className="panel">
               <div className="panel-header">
                 <h2 className="section-heading">保存済みコード</h2>
