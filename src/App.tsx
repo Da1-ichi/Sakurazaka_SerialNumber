@@ -952,6 +952,7 @@ const BOOKMARKLET_CODE = [
 </div>
             <div className="panel">
               <div className="panel-header">
+                <h2 className="section-heading">保存済みコード</h2>
                 <button
                 onClick={() => window.open(targetUrl, "_blank")}
                 disabled={items.length === 0}
@@ -959,8 +960,6 @@ const BOOKMARKLET_CODE = [
               　>
                 応募ページを開く
               </button>
-                
-                <h2 className="section-heading">保存済みコード</h2>
                 <div className="small-button-row">
                   <button onClick={copyAll} className="btn btn-small btn-secondary">
                     全件コピー
