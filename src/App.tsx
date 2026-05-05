@@ -12,9 +12,28 @@ const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
  * 実物のシリアル番号で使われている文字セット:
  *   数字: 3 4 5 6 7 8 9  （0, 1, 2 は未使用）
  *   英字: A-H, J-N, P-Z  （I, O は未使用）
- * 混同を避けるため 0/O, 1/I/L, 2/Z を排除したフォーマット。
  */
 const VALID_CHARS = new Set("3456789ABCDEFGHJKLMNPQRSTUVWXYZ".split(""));
+
+/**
+ * OCR で互いに混同されやすい文字ペア（実測データより）。
+ * 両方とも有効文字なので、Tesseract のホワイトリストだけでは解決できない。
+ * 位置ごとに両方の可能性を展開して候補を生成する。
+ */
+const CONFUSION_PAIRS: Record<string, string[]> = {
+  S: ["S", "5", "9"],  // S ↔ 5（最頻出）, S ↔ 9
+  "5": ["5", "S"],
+  "9": ["9", "S", "G"],
+  B: ["B", "8"],
+  "8": ["8", "B"],
+  E: ["E", "F"],
+  F: ["F", "E"],
+  G: ["G", "9", "6"],
+  "6": ["6", "G"],
+};
+
+/** 画像拡大倍率。Tesseract は文字が大きいほど精度が上がる */
+const UPSCALE_FACTOR = 3;
 
 type SerialItem = {
   id: string;
@@ -41,139 +60,124 @@ const DEFAULT_CROP_SETTINGS: CropSettings = {
   threshold: 120,
 };
 
+// ─── OCR テキスト処理 ────────────────────────────────────────
+
 /**
- * OCR の誤認識を補正する。
- * 実物解析の結果、このシリアルでは 0, 1, 2, I, O が一切使われないため
- * それらを最も形状が近い有効文字に確定変換できる。
+ * OCR 生テキストの前処理。
+ * 無効文字（0,1,2,I,O）を形状が近い有効文字に確定変換する。
  */
 function normalizeText(text: string): string {
   return text
     .toUpperCase()
-    // --- 全角英数 → 半角 ---
     .replace(/[Ａ-Ｚ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
     .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
-    // --- OCR 頻出の記号誤認識 ---
+    // 記号の誤認識
     .replace(/[$(]/g, "S")
-    .replace(/[!|]/g, "L")       // | → L（1 は無効文字なので L）
+    .replace(/[!|]/g, "L")
     .replace(/[{}[\]]/g, "")
     .replace(/[#]/g, "H")
     .replace(/[@]/g, "A")
     .replace(/[&]/g, "8")
-    // --- 無効文字の確定変換（0,1,2,I,O はシリアルに存在しない） ---
-    .replace(/0/g, "D")          // 0 → D（丸い形、Q も候補だが D の方が頻出）
-    .replace(/1/g, "L")          // 1 → L（細い縦線）
-    .replace(/2/g, "Z")          // 2 → Z（形状が近い）
-    .replace(/O/g, "D")          // O → D
-    .replace(/I/g, "J")          // I → J（縦線、J の方が近い）
-    // --- 空白・区切り文字を除去 ---
+    // 無効文字の確定変換
+    .replace(/0/g, "D")
+    .replace(/1/g, "L")
+    .replace(/2/g, "Z")
+    .replace(/O/g, "D")
+    .replace(/I/g, "J")
+    // 空白・区切り文字を除去
     .replace(/[\s\-—_\.,:;'"`~]/g, "")
-    // --- 英数字以外 → スペース ---
+    // 英数字以外 → スペース
     .replace(/[^A-Z0-9]/g, " ");
+}
+
+/**
+ * 13 桁の候補に対して、曖昧な位置を展開し全バリアントを生成する。
+ * 例: "SFXVPX3P3K6SV" の S を S/5/9 に、6 を 6/G に展開。
+ * 候補数爆発を防ぐため最大 64 個に制限。
+ */
+function expandAmbiguous(code: string): string[] {
+  const MAX_VARIANTS = 64;
+  let results = [""];
+
+  for (const ch of code) {
+    const alternatives = CONFUSION_PAIRS[ch] ?? [ch];
+    const next: string[] = [];
+    for (const prefix of results) {
+      for (const alt of alternatives) {
+        next.push(prefix + alt);
+        if (next.length >= MAX_VARIANTS) break;
+      }
+      if (next.length >= MAX_VARIANTS) break;
+    }
+    results = next;
+  }
+
+  return [...new Set(results)];
 }
 
 function scoreCandidate(code: string): number {
   let score = 0;
 
-  // 基本: 13 桁の英数字
   if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
 
-  // 末尾 "V" 一致（歴代シングル共通）
+  // 末尾 "V"（歴代共通）
   if (code.endsWith(FIXED_SUFFIX)) score += 80;
 
-  // 末尾 "9V" 一致（今回のシングル固有）
+  // 末尾 "9V"（今回のシングル固有）
   if (code.endsWith(CURRENT_SINGLE_SUFFIX)) score += 100;
 
-  // 有効文字セットのみで構成されているか（0,1,2,I,O を含まない）
+  // 有効文字セットのみで構成
   const allValid = [...code].every((ch) => VALID_CHARS.has(ch));
   if (allValid) score += 80;
 
-  // 数字とアルファベットが混在している
+  // 数字・アルファベット混在
   if (/\d/.test(code)) score += 10;
   if (/[A-Z]/.test(code)) score += 10;
 
-  // 同じ文字が4連続以上は不自然
+  // 同一文字4連続以上はペナルティ
   if (!/(.)\1{3,}/.test(code)) score += 10;
 
   return score;
 }
 
 /**
- * OCR テキストから 13 桁のシリアル候補を抽出する。
- * 主な誤認識パターン（実測データ）に基づいてバリアントを生成し、
- * スコアリングで最も確からしい候補を上位に出す。
- *
- * 実測の主な誤認識:
- *   9 ↔ S (最頻出), 5 ↔ S, 8 ↔ B, F ↔ E, 9 ↔ G
+ * OCR テキストから 13 桁候補を抽出し、曖昧文字を位置ごとに展開する。
  */
 function extractSerialCandidates(text: string): string[] {
-  const base = normalizeText(text);
+  const normalized = normalizeText(text);
 
-  // 実測データに基づく誤認識バリアント
-  // バリアント1: S→5 (S が 5 の誤読だった場合を補正)
-  const variant_S5 = base.replace(/S/g, "5");
-  // バリアント2: S→9
-  const variant_S9 = base.replace(/S/g, "9");
-  // バリアント3: B→8
-  const variant_B8 = base.replace(/B/g, "8");
-  // バリアント4: E→F
-  const variant_EF = base.replace(/E/g, "F");
-  // バリアント5: 末尾付近の S を 9 に（末尾 9V のため特に重要）
-  const variant_tail = base.replace(/S(V\s*$|V\s)/g, "9$1");
+  // 13 桁の生候補を抽出
+  const rawCandidates = new Set<string>();
 
-  const variants = [base, variant_S5, variant_S9, variant_B8, variant_EF, variant_tail];
+  const directMatches = normalized.match(SERIAL_REGEX) ?? [];
+  for (const m of directMatches) rawCandidates.add(m);
 
+  const compact = normalized.replace(/\s+/g, "");
+  for (let i = 0; i <= compact.length - 13; i++) {
+    const chunk = compact.slice(i, i + 13);
+    if (/^[A-Z0-9]{13}$/.test(chunk)) {
+      rawCandidates.add(chunk);
+    }
+  }
+
+  // 各生候補を曖昧文字展開してスコアリング
   const scored = new Map<string, number>();
 
-  for (const normalized of variants) {
-    // 正規表現で直接マッチ
-    const direct = normalized.match(SERIAL_REGEX) ?? [];
-    for (const value of direct) {
-      const score = scoreCandidate(value);
-      scored.set(value, Math.max(scored.get(value) ?? 0, score));
+  for (const raw of rawCandidates) {
+    const variants = expandAmbiguous(raw);
+    for (const v of variants) {
+      const s = scoreCandidate(v);
+      scored.set(v, Math.max(scored.get(v) ?? 0, s));
     }
-
-    // 空白を詰めてスライディングウィンドウ
-    const compact = normalized.replace(/\s+/g, "");
-    for (let i = 0; i <= compact.length - 13; i += 1) {
-      const chunk = compact.slice(i, i + 13);
-      if (/^[A-Z0-9]{13}$/.test(chunk)) {
-        const score = scoreCandidate(chunk);
-        scored.set(chunk, Math.max(scored.get(chunk) ?? 0, score));
-      }
-    }
-  }
-
-  // 各候補に対して、末尾を "9V" に補正した追加候補も生成
-  const extras = new Map<string, number>();
-  for (const [code, _score] of scored) {
-    // 末尾が SV → 9V に補正
-    if (code.endsWith("SV")) {
-      const fixed = code.slice(0, -2) + "9V";
-      const fixedScore = scoreCandidate(fixed);
-      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
-    }
-    // 末尾が GV → 9V に補正
-    if (code.endsWith("GV")) {
-      const fixed = code.slice(0, -2) + "9V";
-      const fixedScore = scoreCandidate(fixed);
-      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
-    }
-    // 末尾が 99 → 9V に補正（V→9 誤読）
-    if (code.endsWith("99")) {
-      const fixed = code.slice(0, -1) + "V";
-      const fixedScore = scoreCandidate(fixed);
-      extras.set(fixed, Math.max(extras.get(fixed) ?? 0, fixedScore));
-    }
-  }
-
-  for (const [code, score] of extras) {
-    scored.set(code, Math.max(scored.get(code) ?? 0, score));
   }
 
   return [...scored.entries()]
     .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
     .map(([value]) => value);
 }
+
+// ─── ユーティリティ ──────────────────────────────────────────
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("ja-JP");
@@ -182,6 +186,8 @@ function formatDate(iso: string): string {
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
+
+// ─── メインコンポーネント ────────────────────────────────────
 
 export default function SerialReaderPrototype() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -206,8 +212,8 @@ export default function SerialReaderPrototype() {
   const [showAdjuster, setShowAdjuster] = useState(true);
   const [cropSettings, setCropSettings] = useState<CropSettings>(DEFAULT_CROP_SETTINGS);
   const [targetUrl, setTargetUrl] = useState(
-  "https://ticket.fortunemeets.app/sakurazaka46/14th#/"
-);
+    "https://ticket.fortunemeets.app/sakurazaka46/14th#/"
+  );
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -333,7 +339,11 @@ export default function SerialReaderPrototype() {
     }
   }
 
-  function captureGuideArea(): string | null {
+  /**
+   * ガイド枠の映像を切り出し、前処理して PNG 化する。
+   * 3倍に拡大 → コントラスト強調 → 二値化。
+   */
+  function captureGuideArea(thresholdOverride?: number): string | null {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return null;
@@ -347,22 +357,32 @@ export default function SerialReaderPrototype() {
     const cropX = Math.floor(vw * cropSettings.x);
     const cropY = Math.floor(vh * cropSettings.y);
 
-    canvas.width = cropWidth;
-    canvas.height = cropHeight;
+    const outW = cropWidth * UPSCALE_FACTOR;
+    const outH = cropHeight * UPSCALE_FACTOR;
+
+    canvas.width = outW;
+    canvas.height = outH;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
 
-    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, outW, outH);
 
-    const imageData = ctx.getImageData(0, 0, cropWidth, cropHeight);
+    const threshold = thresholdOverride ?? cropSettings.threshold;
+
+    const imageData = ctx.getImageData(0, 0, outW, outH);
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const boosted = avg > cropSettings.threshold ? 255 : 0;
-      data[i] = boosted;
-      data[i + 1] = boosted;
-      data[i + 2] = boosted;
+      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      // コントラスト強調
+      const adjusted = ((gray / 255 - 0.5) * 1.5 + 0.5) * 255;
+      const clamped = Math.max(0, Math.min(255, adjusted));
+      const bw = clamped > threshold ? 255 : 0;
+      data[i] = bw;
+      data[i + 1] = bw;
+      data[i + 2] = bw;
     }
     ctx.putImageData(imageData, 0, 0);
 
@@ -401,6 +421,9 @@ export default function SerialReaderPrototype() {
     return didSave;
   }
 
+  /**
+   * OCR 実行。しきい値を変えた2パスで実行し結果をマージ。
+   */
   async function readSerial(options?: { autoSave?: boolean }) {
     try {
       setStatus("reading");
@@ -409,13 +432,7 @@ export default function SerialReaderPrototype() {
       setCandidates([]);
       setSelectedCandidate("");
 
-      const snapshot = captureGuideArea();
-      if (!snapshot) throw new Error("capture failed");
-      setLastSnapshot(snapshot);
-
       const Tesseract = await import("tesseract.js");
-
-      // Worker を初回だけ作成し、以降は再利用する
       if (!ocrWorkerRef.current) {
         const worker = await Tesseract.createWorker("eng", undefined, {
           logger: (m: { status: string; progress?: number }) => {
@@ -426,8 +443,6 @@ export default function SerialReaderPrototype() {
             }
           },
         });
-        // PSM 7 = 1行テキスト想定。ガイド枠でシリアル1行に絞っている前提
-        // 文字ホワイトリストで 0,1,2,I,O を除外し誤認識を減らす
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (worker as any).setParameters({
           tessedit_pageseg_mode: "7",
@@ -436,12 +451,24 @@ export default function SerialReaderPrototype() {
         ocrWorkerRef.current = worker;
       }
 
-      const result = await ocrWorkerRef.current.recognize(snapshot);
+      // パス1: 通常しきい値
+      const snapshot1 = captureGuideArea();
+      if (!snapshot1) throw new Error("capture failed");
+      setLastSnapshot(snapshot1);
+      const result1 = await ocrWorkerRef.current.recognize(snapshot1);
+      const text1 = result1.data.text ?? "";
 
-      const text = result.data.text ?? "";
-      setRawText(text);
+      // パス2: しきい値 +25 でもう一度
+      const snapshot2 = captureGuideArea(cropSettings.threshold + 25);
+      const result2 = snapshot2
+        ? await ocrWorkerRef.current.recognize(snapshot2)
+        : null;
+      const text2 = result2?.data?.text ?? "";
 
-      const found = extractSerialCandidates(text);
+      const combinedText = text1 + " " + text2;
+      setRawText(text1 + (text2 ? ` | ${text2}` : ""));
+
+      const found = extractSerialCandidates(combinedText);
       setCandidates(found);
       setSelectedCandidate(found[0] ?? "");
 
@@ -451,7 +478,7 @@ export default function SerialReaderPrototype() {
       } else {
         setStatusText(
           found.length > 0
-            ? `候補 ${found.length} 件（末尾${FIXED_SUFFIX}優先）`
+            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先）`
             : "候補なし。位置を合わせ直してください。"
         );
       }
@@ -607,14 +634,14 @@ export default function SerialReaderPrototype() {
           </div>
 
           <div className="control-box">
-  <span>遷移URL</span>
-  <input
-    type="text"
-    value={targetUrl}
-    onChange={(e) => setTargetUrl(e.target.value)}
-    className="text-input"
-  />
-</div>
+            <span>遷移URL</span>
+            <input
+              type="text"
+              value={targetUrl}
+              onChange={(e) => setTargetUrl(e.target.value)}
+              className="text-input"
+            />
+          </div>
 
           {showAdjuster && (
             <div className="adjuster-panel">
@@ -790,19 +817,19 @@ export default function SerialReaderPrototype() {
               </div>
 
               <button
-              onClick={addSelected}
-  disabled={!selectedCandidate}
-  className="btn btn-save full-width"
->
-  保存
-</button>
+                onClick={addSelected}
+                disabled={!selectedCandidate}
+                className="btn btn-save full-width"
+              >
+                保存
+              </button>
 
               <button
-  onClick={() => window.open(targetUrl, "_blank")}
-  className="btn btn-secondary full-width"
->
-  応募ページを開く
-</button>
+                onClick={() => window.open(targetUrl, "_blank")}
+                className="btn btn-secondary full-width"
+              >
+                応募ページを開く
+              </button>
             </div>
 
             <div className="panel">
