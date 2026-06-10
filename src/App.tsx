@@ -12,7 +12,12 @@ import {
 } from "./constants";
 import type { PassConfig } from "./constants";
 import { clamp } from "./utils/helpers";
-import { extractRawSerials, aggregateCandidates } from "./utils/ocr";
+import {
+  extractRawSerials,
+  aggregateCandidates,
+  aggregateBySymbols,
+} from "./utils/ocr";
+import type { OcrSymbol } from "./utils/ocr";
 
 import { useCamera } from "./hooks/useCamera";
 import { useSerialItems } from "./hooks/useSerialItems";
@@ -259,7 +264,7 @@ export default function SerialReaderPrototype() {
       camera.setStatusText(
         isAuto
           ? "連続スキャン実行中..."
-          : `OCR実行中... (高精度 ${passes.length}パス)`
+          : `OCR実行中... (legacy 高精度 ${passes.length}パス)`
       );
       setRawText("");
       setCandidates([]);
@@ -267,7 +272,15 @@ export default function SerialReaderPrototype() {
 
       const Tesseract = await import("tesseract.js");
       if (!ocrWorkerRef.current) {
-        const worker = await Tesseract.createWorker("eng", undefined, {
+        camera.setStatusText("認識エンジン初期化中...（初回のみ時間がかかります）");
+        // legacy エンジン (OEM 0)。LSTM と違い文字単位の代替候補(choices)が
+        // 取得でき、等幅シリアルの誤読も少ない。言語データは約23MBで初回ロードが重い。
+        const worker = await Tesseract.createWorker("eng", 0, {
+          // legacy 対応のコア／言語データを使用する
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          legacyCore: true,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          legacyLang: true,
           logger: (m: { status: string; progress?: number }) => {
             if (m.status === "recognizing text") {
               camera.setStatusText(
@@ -275,7 +288,8 @@ export default function SerialReaderPrototype() {
               );
             }
           },
-        });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (worker as any).setParameters({
           tessedit_pageseg_mode: "7",
@@ -284,7 +298,7 @@ export default function SerialReaderPrototype() {
         ocrWorkerRef.current = worker;
       }
 
-      const allRawCandidates: string[] = [];
+      const perPassSymbols: OcrSymbol[][] = [];
       const rawTexts: string[] = [];
       let firstSnapshot: string | null = null;
 
@@ -298,19 +312,57 @@ export default function SerialReaderPrototype() {
         if (!snapshot) continue;
         if (!firstSnapshot) firstSnapshot = snapshot;
 
-        const result = await ocrWorkerRef.current.recognize(snapshot);
-        const text: string = result.data.text ?? "";
-        rawTexts.push(text.trim());
+        // blocks:true で文字単位(symbol)の確信度・代替候補を取得する
+        const result = await ocrWorkerRef.current.recognize(
+          snapshot,
+          {},
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          { blocks: true } as any
+        );
+        const data = result.data;
+        rawTexts.push((data.text ?? "").trim());
 
-        // 各パスから 13 桁の生候補を抽出
-        allRawCandidates.push(...extractRawSerials(text));
+        // symbol 列を平坦化して取り出す
+        const syms: OcrSymbol[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const block of (data as any).blocks ?? []) {
+          for (const par of block.paragraphs ?? []) {
+            for (const line of par.lines ?? []) {
+              for (const word of line.words ?? []) {
+                for (const sym of word.symbols ?? []) {
+                  const ch = (sym.text ?? "").toUpperCase();
+                  if (!/[A-Z0-9]/.test(ch)) continue;
+                  syms.push({
+                    char: ch,
+                    conf: sym.confidence ?? 0,
+                    choices: (sym.choices ?? [])
+                      .map((c: { text?: string; confidence?: number }) => ({
+                        t: (c.text ?? "").toUpperCase(),
+                        cf: c.confidence ?? 0,
+                      }))
+                      .filter((c: { t: string }) => /^[A-Z0-9]$/.test(c.t)),
+                  });
+                }
+              }
+            }
+          }
+        }
+        perPassSymbols.push(syms);
       }
 
       if (firstSnapshot) setLastSnapshot(firstSnapshot);
       setRawText(rawTexts.filter(Boolean).join(" | ") || "(取得失敗)");
 
-      // 全パスの生候補を位置投票＋スコアリングで集約
-      const found = aggregateCandidates(allRawCandidates);
+      // symbol 単位の確信度＋代替候補で投票集約（第二層の本体）
+      let found = aggregateBySymbols(perPassSymbols);
+
+      // 万一 symbol が取れない環境では、生テキストの文字列ベース集約に退避
+      if (found.length === 0) {
+        const fallback: string[] = [];
+        for (const t of rawTexts) fallback.push(...extractRawSerials(t));
+        found = aggregateCandidates(fallback);
+      }
+
       setCandidates(found);
       setSelectedCandidate(found[0] ?? "");
 
@@ -325,20 +377,9 @@ export default function SerialReaderPrototype() {
             : `同一コードをスキップ: ${found[0]}`
         );
       } else {
-        // 何パスで同じ生候補が出たかを表示して信頼度を伝える
-        const occurrence = new Map<string, number>();
-        for (const c of allRawCandidates) {
-          occurrence.set(c, (occurrence.get(c) ?? 0) + 1);
-        }
-        const topOccurrence = occurrence.get(found[0] ?? "") ?? 0;
-        const matchHint =
-          topOccurrence >= 2
-            ? `・${topOccurrence}/${passes.length}パス一致`
-            : "";
-
         camera.setStatusText(
           found.length > 0
-            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先${matchHint}）`
+            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先）`
             : "候補なし。位置を合わせ直してください。"
         );
       }
