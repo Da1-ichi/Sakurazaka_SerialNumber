@@ -40,27 +40,28 @@ export const MAX_DISPLAY_CANDIDATES = 10;
 
 /**
  * 多パス OCR の前処理設定。
- * 1 枚の画像から複数の前処理バリアントを作り、それぞれ OCR して結果を投票で集約する。
+ * Otsu 法で画像ごとに最適なしきい値を自動算出し、それを基準に offset を加える。
+ * （旧版の sharpen / morphology は、ピントの甘い実入力では文字を潰し
+ *   混同・取得失敗を増やすため廃止した）
  */
 export type PassConfig = {
+  /** Otsu 自動しきい値からのオフセット。0 なら Otsu 値そのまま */
   thresholdOffset: number;
-  sharpen?: boolean;
-  morphology?: "thicken" | "thin" | null;
 };
 
 /** 連続スキャン時の軽量パス（処理時間優先） */
 export const QUICK_PASSES: PassConfig[] = [
   { thresholdOffset: 0 },
-  { thresholdOffset: 25 },
+  { thresholdOffset: 15 },
 ];
 
-/** 手動シャッター時の高精度パス（精度優先） */
+/** 手動シャッター時の高精度パス（精度優先、Otsu基準で±に振るだけ） */
 export const ACCURATE_PASSES: PassConfig[] = [
   { thresholdOffset: -20 },
+  { thresholdOffset: -10 },
   { thresholdOffset: 0 },
-  { thresholdOffset: 0, sharpen: true },
-  { thresholdOffset: 25 },
-  { thresholdOffset: 0, morphology: "thicken" },
+  { thresholdOffset: 10 },
+  { thresholdOffset: 20 },
 ];
 
 export const DEFAULT_CROP_SETTINGS: CropSettings = {

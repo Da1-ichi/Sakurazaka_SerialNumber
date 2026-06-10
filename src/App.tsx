@@ -192,7 +192,6 @@ export default function SerialReaderPrototype() {
     ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, outW, outH);
 
     const thresholdOffset = passCfg?.thresholdOffset ?? 0;
-    const threshold = cropSettings.threshold + thresholdOffset;
 
     const imageData = ctx.getImageData(0, 0, outW, outH);
     const data = imageData.data;
@@ -205,71 +204,42 @@ export default function SerialReaderPrototype() {
       gray[p] = Math.max(0, Math.min(255, adjusted));
     }
 
-    // Step 2: シャープニング（5点ラプラシアン）。薄い線を強調して誤認の票割れを促す
-    let processed = gray;
-    if (passCfg?.sharpen) {
-      const sharpened = new Uint8ClampedArray(outW * outH);
-      for (let y = 0; y < outH; y++) {
-        for (let x = 0; x < outW; x++) {
-          const idx = y * outW + x;
-          if (x === 0 || x === outW - 1 || y === 0 || y === outH - 1) {
-            sharpened[idx] = gray[idx];
-            continue;
-          }
-          const c = gray[idx];
-          const t = gray[idx - outW];
-          const b = gray[idx + outW];
-          const l = gray[idx - 1];
-          const r = gray[idx + 1];
-          const v = 5 * c - t - b - l - r;
-          sharpened[idx] = Math.max(0, Math.min(255, v));
-        }
+    // Step 2: Otsu 法で画像ごとに最適しきい値を自動算出
+    //   固定しきい値は照明変化に弱いため、ヒストグラムからクラス間分散が
+    //   最大になる境界を求める。
+    const hist = new Array(256).fill(0);
+    for (let p = 0; p < gray.length; p++) hist[gray[p]]++;
+    const total = gray.length;
+    let sumAll = 0;
+    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+    let sumB = 0;
+    let wB = 0;
+    let maxBetween = -1;
+    let otsu = 120;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      const wF = total - wB;
+      if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB;
+      const mF = (sumAll - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxBetween) {
+        maxBetween = between;
+        otsu = t;
       }
-      processed = sharpened;
     }
 
-    // Step 3: 二値化
-    const binary = new Uint8ClampedArray(outW * outH);
-    for (let p = 0; p < processed.length; p++) {
-      binary[p] = processed[p] > threshold ? 255 : 0;
-    }
+    // 最終しきい値 = Otsu自動値 + 手動バイアス(スライダー) + パスオフセット
+    //   スライダーが既定の 120 なら手動バイアスは 0（純粋な自動二値化）。
+    //   極端な照明時のみスライダーで Otsu からずらせる。
+    const manualBias = cropSettings.threshold - 120;
+    const threshold = otsu + manualBias + thresholdOffset;
 
-    // Step 4: モルフォロジー演算
-    //   thicken: 黒（文字）を膨張 → ノイズで途切れた線を補完
-    //   thin:    黒を収縮 → 太すぎて潰れた文字を細く
-    let finalBuf = binary;
-    if (passCfg?.morphology) {
-      const morphed = new Uint8ClampedArray(outW * outH);
-      const isThicken = passCfg.morphology === "thicken";
-      for (let y = 0; y < outH; y++) {
-        for (let x = 0; x < outW; x++) {
-          const idx = y * outW + x;
-          if (x === 0 || x === outW - 1 || y === 0 || y === outH - 1) {
-            morphed[idx] = binary[idx];
-            continue;
-          }
-          let hasBlack = false;
-          let hasWhite = false;
-          for (let dy = -1; dy <= 1; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              const v = binary[(y + dy) * outW + (x + dx)];
-              if (v === 0) hasBlack = true;
-              else hasWhite = true;
-            }
-          }
-          if (isThicken) {
-            morphed[idx] = hasBlack ? 0 : 255;
-          } else {
-            morphed[idx] = hasWhite ? 255 : 0;
-          }
-        }
-      }
-      finalBuf = morphed;
-    }
-
-    // RGBA に書き戻し
-    for (let p = 0, i = 0; p < finalBuf.length; p++, i += 4) {
-      const v = finalBuf[p];
+    // Step 3: 二値化して RGBA に書き戻し
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      const v = gray[p] > threshold ? 255 : 0;
       data[i] = v;
       data[i + 1] = v;
       data[i + 2] = v;
