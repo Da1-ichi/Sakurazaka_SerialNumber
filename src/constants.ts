@@ -1,9 +1,9 @@
 import type { CropSettings } from "./types";
 
 export const SERIAL_REGEX = /[A-Z0-9]{13}/g;
-export const FIXED_SUFFIX = "V";
+export const FIXED_SUFFIX = "T";
 /** シングルごとに変わる末尾パターン（将来 UI で可変にする想定） */
-export const CURRENT_SINGLE_SUFFIX = "9V";
+export const CURRENT_SINGLE_SUFFIX = "WT";
 export const STORAGE_KEY = "serial-reader-items";
 export const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
 
@@ -20,9 +20,10 @@ export const VALID_CHARS = new Set("3456789ABCDEFGHJKLMNPQRSTUVWXYZ".split(""));
  * 位置ごとに両方の可能性を展開して候補を生成する。
  */
 export const CONFUSION_PAIRS: Record<string, string[]> = {
-  S: ["S", "5", "9"],
+  S: ["S", "5"],
   "5": ["5", "S"],
-  "9": ["9", "S", "G"],
+  "9": ["9", "P", "S", "G"],
+  P: ["P", "9"], // P ↔ 9（追加）
   B: ["B", "8"],
   "8": ["8", "B"],
   E: ["E", "F"],
@@ -33,6 +34,34 @@ export const CONFUSION_PAIRS: Record<string, string[]> = {
 
 /** 画像拡大倍率。Tesseract は文字が大きいほど精度が上がる */
 export const UPSCALE_FACTOR = 3;
+
+/** 表示する候補の最大件数（多すぎると選びにくいので絞る） */
+export const MAX_DISPLAY_CANDIDATES = 10;
+
+/**
+ * 多パス OCR の前処理設定。
+ * 1 枚の画像から複数の前処理バリアントを作り、それぞれ OCR して結果を投票で集約する。
+ */
+export type PassConfig = {
+  thresholdOffset: number;
+  sharpen?: boolean;
+  morphology?: "thicken" | "thin" | null;
+};
+
+/** 連続スキャン時の軽量パス（処理時間優先） */
+export const QUICK_PASSES: PassConfig[] = [
+  { thresholdOffset: 0 },
+  { thresholdOffset: 25 },
+];
+
+/** 手動シャッター時の高精度パス（精度優先） */
+export const ACCURATE_PASSES: PassConfig[] = [
+  { thresholdOffset: -20 },
+  { thresholdOffset: 0 },
+  { thresholdOffset: 0, sharpen: true },
+  { thresholdOffset: 25 },
+  { thresholdOffset: 0, morphology: "thicken" },
+];
 
 export const DEFAULT_CROP_SETTINGS: CropSettings = {
   x: 0.2,

@@ -7,9 +7,12 @@ import {
   DEFAULT_CROP_SETTINGS,
   CURRENT_SINGLE_SUFFIX,
   UPSCALE_FACTOR,
+  QUICK_PASSES,
+  ACCURATE_PASSES,
 } from "./constants";
+import type { PassConfig } from "./constants";
 import { clamp } from "./utils/helpers";
-import { extractSerialCandidates } from "./utils/ocr";
+import { extractRawSerials, aggregateCandidates } from "./utils/ocr";
 
 import { useCamera } from "./hooks/useCamera";
 import { useSerialItems } from "./hooks/useSerialItems";
@@ -161,7 +164,7 @@ export default function SerialReaderPrototype() {
 
   // ─── キャプチャ & OCR ──────────────────────────────────────
 
-  function captureGuideArea(thresholdOverride?: number): string | null {
+  function captureGuideArea(passCfg?: PassConfig): string | null {
     const video = camera.videoRef.current;
     const canvas = camera.canvasRef.current;
     if (!video || !canvas) return null;
@@ -188,19 +191,88 @@ export default function SerialReaderPrototype() {
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, outW, outH);
 
-    const threshold = thresholdOverride ?? cropSettings.threshold;
+    const thresholdOffset = passCfg?.thresholdOffset ?? 0;
+    const threshold = cropSettings.threshold + thresholdOffset;
 
     const imageData = ctx.getImageData(0, 0, outW, outH);
     const data = imageData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const gray =
-        0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      const adjusted = ((gray / 255 - 0.5) * 1.5 + 0.5) * 255;
-      const clamped = Math.max(0, Math.min(255, adjusted));
-      const bw = clamped > threshold ? 255 : 0;
-      data[i] = bw;
-      data[i + 1] = bw;
-      data[i + 2] = bw;
+
+    // Step 1: グレースケール＋コントラスト強調
+    const gray = new Uint8ClampedArray(outW * outH);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      const adjusted = ((g / 255 - 0.5) * 1.5 + 0.5) * 255;
+      gray[p] = Math.max(0, Math.min(255, adjusted));
+    }
+
+    // Step 2: シャープニング（5点ラプラシアン）。薄い線を強調して誤認の票割れを促す
+    let processed = gray;
+    if (passCfg?.sharpen) {
+      const sharpened = new Uint8ClampedArray(outW * outH);
+      for (let y = 0; y < outH; y++) {
+        for (let x = 0; x < outW; x++) {
+          const idx = y * outW + x;
+          if (x === 0 || x === outW - 1 || y === 0 || y === outH - 1) {
+            sharpened[idx] = gray[idx];
+            continue;
+          }
+          const c = gray[idx];
+          const t = gray[idx - outW];
+          const b = gray[idx + outW];
+          const l = gray[idx - 1];
+          const r = gray[idx + 1];
+          const v = 5 * c - t - b - l - r;
+          sharpened[idx] = Math.max(0, Math.min(255, v));
+        }
+      }
+      processed = sharpened;
+    }
+
+    // Step 3: 二値化
+    const binary = new Uint8ClampedArray(outW * outH);
+    for (let p = 0; p < processed.length; p++) {
+      binary[p] = processed[p] > threshold ? 255 : 0;
+    }
+
+    // Step 4: モルフォロジー演算
+    //   thicken: 黒（文字）を膨張 → ノイズで途切れた線を補完
+    //   thin:    黒を収縮 → 太すぎて潰れた文字を細く
+    let finalBuf = binary;
+    if (passCfg?.morphology) {
+      const morphed = new Uint8ClampedArray(outW * outH);
+      const isThicken = passCfg.morphology === "thicken";
+      for (let y = 0; y < outH; y++) {
+        for (let x = 0; x < outW; x++) {
+          const idx = y * outW + x;
+          if (x === 0 || x === outW - 1 || y === 0 || y === outH - 1) {
+            morphed[idx] = binary[idx];
+            continue;
+          }
+          let hasBlack = false;
+          let hasWhite = false;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const v = binary[(y + dy) * outW + (x + dx)];
+              if (v === 0) hasBlack = true;
+              else hasWhite = true;
+            }
+          }
+          if (isThicken) {
+            morphed[idx] = hasBlack ? 0 : 255;
+          } else {
+            morphed[idx] = hasWhite ? 255 : 0;
+          }
+        }
+      }
+      finalBuf = morphed;
+    }
+
+    // RGBA に書き戻し
+    for (let p = 0, i = 0; p < finalBuf.length; p++, i += 4) {
+      const v = finalBuf[p];
+      data[i] = v;
+      data[i + 1] = v;
+      data[i + 2] = v;
     }
     ctx.putImageData(imageData, 0, 0);
 
@@ -212,8 +284,12 @@ export default function SerialReaderPrototype() {
   ): Promise<string[]> {
     try {
       camera.setStatus("reading");
+      const isAuto = options?.autoSave ?? false;
+      const passes = isAuto ? QUICK_PASSES : ACCURATE_PASSES;
       camera.setStatusText(
-        options?.autoSave ? "連続スキャン実行中..." : "OCR実行中..."
+        isAuto
+          ? "連続スキャン実行中..."
+          : `OCR実行中... (高精度 ${passes.length}パス)`
       );
       setRawText("");
       setCandidates([]);
@@ -238,28 +314,37 @@ export default function SerialReaderPrototype() {
         ocrWorkerRef.current = worker;
       }
 
-      // パス1: 通常しきい値
-      const snapshot1 = captureGuideArea();
-      if (!snapshot1) throw new Error("capture failed");
-      setLastSnapshot(snapshot1);
-      const result1 = await ocrWorkerRef.current.recognize(snapshot1);
-      const text1 = result1.data.text ?? "";
+      const allRawCandidates: string[] = [];
+      const rawTexts: string[] = [];
+      let firstSnapshot: string | null = null;
 
-      // パス2: しきい値 +25 でもう一度
-      const snapshot2 = captureGuideArea(cropSettings.threshold + 25);
-      const result2 = snapshot2
-        ? await ocrWorkerRef.current.recognize(snapshot2)
-        : null;
-      const text2 = result2?.data?.text ?? "";
+      for (let i = 0; i < passes.length; i++) {
+        const passCfg = passes[i];
+        if (!isAuto) {
+          camera.setStatusText(`OCR実行中... パス ${i + 1}/${passes.length}`);
+        }
 
-      const combinedText = text1 + " " + text2;
-      setRawText(text1 + (text2 ? ` | ${text2}` : ""));
+        const snapshot = captureGuideArea(passCfg);
+        if (!snapshot) continue;
+        if (!firstSnapshot) firstSnapshot = snapshot;
 
-      const found = extractSerialCandidates(combinedText);
+        const result = await ocrWorkerRef.current.recognize(snapshot);
+        const text: string = result.data.text ?? "";
+        rawTexts.push(text.trim());
+
+        // 各パスから 13 桁の生候補を抽出
+        allRawCandidates.push(...extractRawSerials(text));
+      }
+
+      if (firstSnapshot) setLastSnapshot(firstSnapshot);
+      setRawText(rawTexts.filter(Boolean).join(" | ") || "(取得失敗)");
+
+      // 全パスの生候補を位置投票＋スコアリングで集約
+      const found = aggregateCandidates(allRawCandidates);
       setCandidates(found);
       setSelectedCandidate(found[0] ?? "");
 
-      if (options?.autoSave && found[0]) {
+      if (isAuto && found[0]) {
         const saved = serialItems.saveCode(found[0], {
           silent: true,
           isAuto: true,
@@ -270,9 +355,20 @@ export default function SerialReaderPrototype() {
             : `同一コードをスキップ: ${found[0]}`
         );
       } else {
+        // 何パスで同じ生候補が出たかを表示して信頼度を伝える
+        const occurrence = new Map<string, number>();
+        for (const c of allRawCandidates) {
+          occurrence.set(c, (occurrence.get(c) ?? 0) + 1);
+        }
+        const topOccurrence = occurrence.get(found[0] ?? "") ?? 0;
+        const matchHint =
+          topOccurrence >= 2
+            ? `・${topOccurrence}/${passes.length}パス一致`
+            : "";
+
         camera.setStatusText(
           found.length > 0
-            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先）`
+            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先${matchHint}）`
             : "候補なし。位置を合わせ直してください。"
         );
       }
