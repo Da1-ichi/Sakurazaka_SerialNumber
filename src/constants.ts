@@ -40,28 +40,35 @@ export const MAX_DISPLAY_CANDIDATES = 10;
 
 /**
  * 多パス OCR の前処理設定。
- * Otsu 法で画像ごとに最適なしきい値を自動算出し、それを基準に offset を加える。
- * （旧版の sharpen / morphology は、ピントの甘い実入力では文字を潰し
- *   混同・取得失敗を増やすため廃止した）
+ * 二値化方式を method で切り替える:
+ *   "adaptive" = 局所適応二値化（影・照明ムラに強い。各ピクセル周辺の平均で判定）
+ *   "global"   = グローバル固定二値化（影のない均一照明用。現状未使用）
+ * グローバルは影が強い場面で画像全体が潰れ、その壊れた結果が投票を
+ * 汚染するため、既定では局所適応のみを使う。thresholdOffset は
+ * adaptive では判定オフセット C を増減させる（大きいほど黒が減る）。
  */
 export type PassConfig = {
-  /** Otsu 自動しきい値からのオフセット。0 なら Otsu 値そのまま */
   thresholdOffset: number;
+  method?: "adaptive" | "global";
 };
 
 /** 連続スキャン時の軽量パス（処理時間優先） */
 export const QUICK_PASSES: PassConfig[] = [
-  { thresholdOffset: 0 },
-  { thresholdOffset: 15 },
+  { thresholdOffset: 0, method: "adaptive" },
+  { thresholdOffset: 20, method: "adaptive" },
 ];
 
-/** 手動シャッター時の高精度パス（精度優先、Otsu基準で±に振るだけ） */
+/**
+ * 手動シャッター時の高精度パス（精度優先）。
+ * 局所適応を C 違いで5本。C が小さいほど薄い線も黒く拾い、
+ * 大きいほどノイズを抑える。影の濃淡・線の太さの違いを投票でカバー。
+ */
 export const ACCURATE_PASSES: PassConfig[] = [
-  { thresholdOffset: -20 },
-  { thresholdOffset: -10 },
-  { thresholdOffset: 0 },
-  { thresholdOffset: 10 },
-  { thresholdOffset: 20 },
+  { thresholdOffset: -20, method: "adaptive" },
+  { thresholdOffset: -5, method: "adaptive" },
+  { thresholdOffset: 10, method: "adaptive" },
+  { thresholdOffset: 25, method: "adaptive" },
+  { thresholdOffset: 40, method: "adaptive" },
 ];
 
 export const DEFAULT_CROP_SETTINGS: CropSettings = {

@@ -209,45 +209,67 @@ export default function SerialReaderPrototype() {
       gray[p] = Math.max(0, Math.min(255, adjusted));
     }
 
-    // Step 2: Otsu 法で画像ごとに最適しきい値を自動算出
-    //   固定しきい値は照明変化に弱いため、ヒストグラムからクラス間分散が
-    //   最大になる境界を求める。
-    const hist = new Array(256).fill(0);
-    for (let p = 0; p < gray.length; p++) hist[gray[p]]++;
-    const total = gray.length;
-    let sumAll = 0;
-    for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-    let sumB = 0;
-    let wB = 0;
-    let maxBetween = -1;
-    let otsu = 120;
-    for (let t = 0; t < 256; t++) {
-      wB += hist[t];
-      if (wB === 0) continue;
-      const wF = total - wB;
-      if (wF === 0) break;
-      sumB += t * hist[t];
-      const mB = sumB / wB;
-      const mF = (sumAll - sumB) / wF;
-      const between = wB * wF * (mB - mF) * (mB - mF);
-      if (between > maxBetween) {
-        maxBetween = between;
-        otsu = t;
+    // Step 2: 二値化。method により方式を切り替える。
+    const method = passCfg?.method ?? "adaptive";
+    const manualBias = cropSettings.threshold - 120;
+
+    if (method === "global") {
+      // グローバル固定二値化（影のない均一照明で安定）。
+      // スライダー値そのもの + パスoffset をしきい値に使う。
+      const threshold = cropSettings.threshold + thresholdOffset;
+      for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+        const v = gray[p] > threshold ? 255 : 0;
+        data[i] = v;
+        data[i + 1] = v;
+        data[i + 2] = v;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      return canvas.toDataURL("image/png");
+    }
+
+    // 局所適応二値化（影・照明ムラに強い）
+    //   各ピクセルの周辺領域の平均を局所しきい値とし、
+    //   「周辺平均より C 以上暗ければ黒」と判定する。
+    //   積分画像(integral image)で領域平均を O(1) 算出し全体 O(n) に抑える。
+    //   C はスライダーとパスoffsetで微調整（暗側に倒すほど黒が増える）。
+    const C = 12 + manualBias * 0.15 + thresholdOffset * 0.4;
+
+    // 近傍ウィンドウ半径（枠の高さに比例、最低でも 7px 確保し奇数寄りに）
+    const win = Math.max(15, Math.floor(outH / 4) | 1);
+    const r = Math.floor(win / 2);
+
+    // 積分画像: ii[(y+1)*(outW+1)+(x+1)] = 左上からの累積和
+    const iw = outW + 1;
+    const ii = new Float64Array(iw * (outH + 1));
+    for (let y = 0; y < outH; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < outW; x++) {
+        rowSum += gray[y * outW + x];
+        ii[(y + 1) * iw + (x + 1)] = ii[y * iw + (x + 1)] + rowSum;
       }
     }
 
-    // 最終しきい値 = Otsu自動値 + 手動バイアス(スライダー) + パスオフセット
-    //   スライダーが既定の 120 なら手動バイアスは 0（純粋な自動二値化）。
-    //   極端な照明時のみスライダーで Otsu からずらせる。
-    const manualBias = cropSettings.threshold - 120;
-    const threshold = otsu + manualBias + thresholdOffset;
-
-    // Step 3: 二値化して RGBA に書き戻し
-    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-      const v = gray[p] > threshold ? 255 : 0;
-      data[i] = v;
-      data[i + 1] = v;
-      data[i + 2] = v;
+    // Step 3: 各ピクセルを局所しきい値で二値化して RGBA に書き戻し
+    for (let y = 0; y < outH; y++) {
+      const y0 = Math.max(0, y - r);
+      const y1 = Math.min(outH, y + r + 1);
+      for (let x = 0; x < outW; x++) {
+        const x0 = Math.max(0, x - r);
+        const x1 = Math.min(outW, x + r + 1);
+        const area = (y1 - y0) * (x1 - x0);
+        const sum =
+          ii[y1 * iw + x1] -
+          ii[y0 * iw + x1] -
+          ii[y1 * iw + x0] +
+          ii[y0 * iw + x0];
+        const mean = sum / area;
+        const p = y * outW + x;
+        const v = gray[p] > mean - C ? 255 : 0;
+        const i = p * 4;
+        data[i] = v;
+        data[i + 1] = v;
+        data[i + 2] = v;
+      }
     }
     ctx.putImageData(imageData, 0, 0);
 
