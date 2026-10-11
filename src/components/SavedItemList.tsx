@@ -28,8 +28,10 @@ export function SavedItemList({
       <div className="panel-header">
         <h2 className="section-heading">保存済みコード</h2>
         <button
-          onClick={() => window.open(targetUrl, "_blank")}
-          disabled={items.length === 0}
+          // 保存済みコードがなくても開ける（先にログインしておく、入力欄を確かめる等）。
+          // 押せないのは応募ページの URL が空のときだけ
+          onClick={() => window.open(targetUrl, "_blank", "noopener")}
+          disabled={!targetUrl.trim()}
           className="btn btn-secondary full-width"
         >
           応募ページを開く
