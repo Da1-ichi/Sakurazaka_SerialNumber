@@ -1,23 +1,33 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Block, Worker } from "tesseract.js";
 import "./styles.css";
 
 import type { CropSettings } from "./types";
 import {
+  AUTO_SCAN_EMPTY_DELAY_MS,
+  AUTO_SCAN_INTERVAL_MAX,
+  AUTO_SCAN_INTERVAL_MIN,
   CROP_SETTINGS_KEY,
   DEFAULT_CROP_SETTINGS,
-  CURRENT_SINGLE_SUFFIX,
+  DEFAULT_FORMAT_SETTINGS,
+  DEFAULT_UI_SETTINGS,
+  FORMAT_SETTINGS_KEY,
+  UI_SETTINGS_KEY,
   UPSCALE_FACTOR,
   QUICK_PASSES,
   ACCURATE_PASSES,
+  resolveValidChars,
+  sanitizeSuffix,
+  sanitizeValidChars,
 } from "./constants";
-import type { PassConfig } from "./constants";
+import type { FormatSettings, PassConfig, UiSettings } from "./constants";
 import { clamp } from "./utils/helpers";
 import {
   extractRawSerials,
   aggregateCandidates,
   aggregateBySymbols,
 } from "./utils/ocr";
-import type { OcrSymbol } from "./utils/ocr";
+import type { OcrSymbol, SerialRules } from "./utils/ocr";
 
 import { useCamera } from "./hooks/useCamera";
 import { useSerialItems } from "./hooks/useSerialItems";
@@ -29,71 +39,224 @@ import { CandidatePanel } from "./components/CandidatePanel";
 import { BookmarkletPanel } from "./components/BookmarkletPanel";
 import { SavedItemList } from "./components/SavedItemList";
 
+// ─── 設定の読み込み・整形 ────────────────────────────────────
+
+/** localStorage から JSON を読む。ない・壊れている場合は null */
+function loadJson<T>(key: string): Partial<T> | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Partial<T>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // 保存できなくても画面の動作は続ける
+  }
+}
+
+function toNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * 枠の設定を範囲内に収める。枠が映像の外にはみ出さないよう、
+ * 動かした値（prev と比べて変わった値）は保ち、相手側を詰める。
+ *   - 幅・高さを広げた → 幅・高さを「1 − 位置」までに抑える
+ *   - 位置を動かした   → 位置を「1 − 幅・高さ」までに抑える
+ */
+function normalizeCrop(next: CropSettings, prev?: CropSettings): CropSettings {
+  let width = clamp(next.width, 0.05, 1);
+  let height = clamp(next.height, 0.03, 1);
+  let x = clamp(next.x, 0, 1);
+  let y = clamp(next.y, 0, 1);
+
+  if (prev && width !== prev.width) width = Math.min(width, 1 - x);
+  else x = Math.min(x, 1 - width);
+  if (prev && height !== prev.height) height = Math.min(height, 1 - y);
+  else y = Math.min(y, 1 - height);
+
+  return {
+    x,
+    y,
+    width: Math.max(width, 0.05),
+    height: Math.max(height, 0.03),
+    threshold: clamp(next.threshold, 0, 255),
+  };
+}
+
+function loadCropSettings(): CropSettings {
+  const saved = loadJson<CropSettings>(CROP_SETTINGS_KEY);
+  if (!saved) return DEFAULT_CROP_SETTINGS;
+  return normalizeCrop({
+    x: toNumber(saved.x, DEFAULT_CROP_SETTINGS.x),
+    y: toNumber(saved.y, DEFAULT_CROP_SETTINGS.y),
+    width: toNumber(saved.width, DEFAULT_CROP_SETTINGS.width),
+    height: toNumber(saved.height, DEFAULT_CROP_SETTINGS.height),
+    threshold: toNumber(saved.threshold, DEFAULT_CROP_SETTINGS.threshold),
+  });
+}
+
+function loadFormatSettings(): FormatSettings {
+  const saved = loadJson<FormatSettings>(FORMAT_SETTINGS_KEY);
+  if (!saved) return DEFAULT_FORMAT_SETTINGS;
+  return {
+    suffix:
+      typeof saved.suffix === "string"
+        ? sanitizeSuffix(saved.suffix)
+        : DEFAULT_FORMAT_SETTINGS.suffix,
+    validChars:
+      typeof saved.validChars === "string"
+        ? sanitizeValidChars(saved.validChars)
+        : DEFAULT_FORMAT_SETTINGS.validChars,
+    targetUrl:
+      typeof saved.targetUrl === "string" && saved.targetUrl.trim()
+        ? saved.targetUrl
+        : DEFAULT_FORMAT_SETTINGS.targetUrl,
+  };
+}
+
+function clampInterval(ms: number): number {
+  return clamp(
+    Math.round(ms) || DEFAULT_UI_SETTINGS.autoScanIntervalMs,
+    AUTO_SCAN_INTERVAL_MIN,
+    AUTO_SCAN_INTERVAL_MAX
+  );
+}
+
+function loadUiSettings(): UiSettings {
+  const saved = loadJson<UiSettings>(UI_SETTINGS_KEY);
+  if (!saved) return DEFAULT_UI_SETTINGS;
+  return {
+    autoScanIntervalMs: clampInterval(
+      toNumber(saved.autoScanIntervalMs, DEFAULT_UI_SETTINGS.autoScanIntervalMs)
+    ),
+    showAdjuster:
+      typeof saved.showAdjuster === "boolean"
+        ? saved.showAdjuster
+        : DEFAULT_UI_SETTINGS.showAdjuster,
+  };
+}
+
+/**
+ * 映像のうち、画面に実際に見えている範囲（映像の画素座標）を求める。
+ * 映像は CSS の object-fit: cover で表示枠に合わせて上下か左右が切れるため、
+ * ガイド枠（表示枠に対する割合）をそのまま映像全体の割合として使うとずれる。
+ */
+function visibleSourceRect(video: HTMLVideoElement) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const cw = video.clientWidth;
+  const ch = video.clientHeight;
+  if (!cw || !ch) return { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  const fit = getComputedStyle(video).objectFit;
+  if (fit !== "cover") return { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  const scale = Math.max(cw / vw, ch / vh);
+  const sw = Math.min(vw, cw / scale);
+  const sh = Math.min(vh, ch / scale);
+  return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
+}
+
+/** blocks から 1 文字ずつの認識結果（確信度・代替候補つき）を平坦化して取り出す */
+function collectSymbols(blocks: Block[] | null): OcrSymbol[] {
+  const syms: OcrSymbol[] = [];
+  for (const block of blocks ?? []) {
+    for (const par of block.paragraphs ?? []) {
+      for (const line of par.lines ?? []) {
+        for (const word of line.words ?? []) {
+          for (const sym of word.symbols ?? []) {
+            const ch = (sym.text ?? "").toUpperCase();
+            if (!/[A-Z0-9]/.test(ch)) continue;
+            syms.push({
+              char: ch,
+              conf: sym.confidence ?? 0,
+              choices: (sym.choices ?? [])
+                .map((c) => ({
+                  t: (c.text ?? "").toUpperCase(),
+                  cf: c.confidence ?? 0,
+                }))
+                .filter((c) => /^[A-Z0-9]$/.test(c.t)),
+            });
+          }
+        }
+      }
+    }
+  }
+  return syms;
+}
+
 // ─── メインコンポーネント ────────────────────────────────────
 
 export default function SerialReaderPrototype() {
   const camera = useCamera();
   const serialItems = useSerialItems();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const ocrWorkerRef = useRef<any>(null);
-  const autoScanTimerRef = useRef<number | null>(null);
+  const ocrWorkerRef = useRef<Worker | null>(null);
+  /** ワーカーに現在設定してある認識文字（変わったときだけ設定し直す） */
+  const appliedWhitelistRef = useRef("");
+  /** 読み取りの重複実行を防ぐ（手動と自動が重ならないように） */
+  const readingRef = useRef(false);
 
   const [rawText, setRawText] = useState("");
   const [candidates, setCandidates] = useState<string[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState("");
   const [lastSnapshot, setLastSnapshot] = useState("");
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
-  const [autoScanIntervalMs, setAutoScanIntervalMs] = useState(1200);
   const [isAutoScanning, setIsAutoScanning] = useState(false);
-  const [showAdjuster, setShowAdjuster] = useState(true);
-  const [cropSettings, setCropSettings] = useState<CropSettings>(
-    DEFAULT_CROP_SETTINGS
-  );
-  const [targetUrl, setTargetUrl] = useState(
-    "https://ticket.fortunemeets.app/sakurazaka46/14th#/"
-  );
+  const [cropSettings, setCropSettings] =
+    useState<CropSettings>(loadCropSettings);
+  const [formatSettings, setFormatSettings] =
+    useState<FormatSettings>(loadFormatSettings);
+  const [uiSettings, setUiSettings] = useState<UiSettings>(loadUiSettings);
 
-  // ─── cropSettings の永続化 ─────────────────────────────────
+  // ─── 設定の保存 ────────────────────────────────────────────
 
   useEffect(() => {
-    const savedCrop = localStorage.getItem(CROP_SETTINGS_KEY);
-    if (savedCrop) {
-      try {
-        const parsed = JSON.parse(savedCrop) as CropSettings;
-        setCropSettings({
-          x: clamp(parsed.x ?? DEFAULT_CROP_SETTINGS.x, 0, 1),
-          y: clamp(parsed.y ?? DEFAULT_CROP_SETTINGS.y, 0, 1),
-          width: clamp(parsed.width ?? DEFAULT_CROP_SETTINGS.width, 0.05, 1),
-          height: clamp(
-            parsed.height ?? DEFAULT_CROP_SETTINGS.height,
-            0.03,
-            1
-          ),
-          threshold: clamp(
-            parsed.threshold ?? DEFAULT_CROP_SETTINGS.threshold,
-            0,
-            255
-          ),
-        });
-      } catch {
-        // ignore
-      }
-    }
-
-    return () => {
-      stopAutoScan();
-      if (ocrWorkerRef.current) {
-        ocrWorkerRef.current.terminate();
-        ocrWorkerRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(CROP_SETTINGS_KEY, JSON.stringify(cropSettings));
+    saveJson(CROP_SETTINGS_KEY, cropSettings);
   }, [cropSettings]);
+
+  useEffect(() => {
+    saveJson(FORMAT_SETTINGS_KEY, formatSettings);
+  }, [formatSettings]);
+
+  useEffect(() => {
+    saveJson(UI_SETTINGS_KEY, uiSettings);
+  }, [uiSettings]);
+
+  /** 枠の変更はすべてここを通し、はみ出さないように整える */
+  const updateCropSettings = useCallback(
+    (action: React.SetStateAction<CropSettings>) => {
+      setCropSettings((prev) => {
+        const next = typeof action === "function" ? action(prev) : action;
+        return normalizeCrop(next, prev);
+      });
+    },
+    []
+  );
+
+  // ─── 判定ルール（末尾・有効文字） ─────────────────────────
+
+  const rules = useMemo<SerialRules>(
+    () => ({
+      suffix: sanitizeSuffix(formatSettings.suffix),
+      validChars: resolveValidChars(formatSettings),
+    }),
+    [formatSettings]
+  );
+
+  /** OCR に認識させる文字。有効文字（＋末尾の文字）と同じにする */
+  const whitelist = useMemo(
+    () => [...rules.validChars].sort().join(""),
+    [rules]
+  );
 
   // ─── ガイド枠スタイル ──────────────────────────────────────
 
@@ -106,67 +269,6 @@ export default function SerialReaderPrototype() {
     };
   }, [cropSettings]);
 
-  // ─── 自動スキャン ──────────────────────────────────────────
-
-  function stopAutoScan() {
-    if (autoScanTimerRef.current !== null) {
-      window.clearTimeout(autoScanTimerRef.current);
-      autoScanTimerRef.current = null;
-    }
-    setIsAutoScanning(false);
-  }
-
-  async function runAutoScanLoop() {
-    if (
-      !autoScanEnabled ||
-      autoScanTimerRef.current !== null ||
-      camera.status !== "ready"
-    )
-      return;
-    setIsAutoScanning(true);
-
-    const loop = async () => {
-      autoScanTimerRef.current = null;
-      if (!autoScanEnabled || !camera.streamRef.current) {
-        setIsAutoScanning(false);
-        return;
-      }
-
-      const found = await readSerial({ autoSave: true });
-      const delay =
-        found.length > 0
-          ? autoScanIntervalMs
-          : Math.max(autoScanIntervalMs, 1600);
-
-      if (!autoScanEnabled || !camera.streamRef.current) {
-        setIsAutoScanning(false);
-        return;
-      }
-
-      autoScanTimerRef.current = window.setTimeout(loop, delay);
-    };
-
-    autoScanTimerRef.current = window.setTimeout(loop, autoScanIntervalMs);
-  }
-
-  useEffect(() => {
-    if (
-      autoScanEnabled &&
-      camera.status === "ready" &&
-      camera.streamRef.current
-    ) {
-      runAutoScanLoop();
-    }
-    if (!autoScanEnabled) {
-      stopAutoScan();
-    }
-
-    return () => {
-      if (!autoScanEnabled) stopAutoScan();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoScanEnabled, autoScanIntervalMs, camera.status]);
-
   // ─── キャプチャ & OCR ──────────────────────────────────────
 
   function captureGuideArea(passCfg?: PassConfig): string | null {
@@ -175,13 +277,14 @@ export default function SerialReaderPrototype() {
     if (!video || !canvas) return null;
     if (!video.videoWidth || !video.videoHeight) return null;
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+    // 画面に見えている範囲を基準に、ガイド枠と同じ場所を切り出す
+    const { sx, sy, sw, sh } = visibleSourceRect(video);
+    const crop = normalizeCrop(cropSettings);
 
-    const cropWidth = Math.floor(vw * cropSettings.width);
-    const cropHeight = Math.floor(vh * cropSettings.height);
-    const cropX = Math.floor(vw * cropSettings.x);
-    const cropY = Math.floor(vh * cropSettings.y);
+    const cropWidth = Math.max(1, Math.floor(sw * crop.width));
+    const cropHeight = Math.max(1, Math.floor(sh * crop.height));
+    const cropX = Math.floor(sx + sw * crop.x);
+    const cropY = Math.floor(sy + sh * crop.y);
 
     const outW = cropWidth * UPSCALE_FACTOR;
     const outH = cropHeight * UPSCALE_FACTOR;
@@ -211,12 +314,12 @@ export default function SerialReaderPrototype() {
 
     // Step 2: 二値化。method により方式を切り替える。
     const method = passCfg?.method ?? "adaptive";
-    const manualBias = cropSettings.threshold - 120;
+    const manualBias = crop.threshold - 120;
 
     if (method === "global") {
       // グローバル固定二値化（影のない均一照明で安定）。
       // スライダー値そのもの + パスoffset をしきい値に使う。
-      const threshold = cropSettings.threshold + thresholdOffset;
+      const threshold = crop.threshold + thresholdOffset;
       for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
         const v = gray[p] > threshold ? 255 : 0;
         data[i] = v;
@@ -276,9 +379,49 @@ export default function SerialReaderPrototype() {
     return canvas.toDataURL("image/png");
   }
 
-  async function readSerial(
-    options?: { autoSave?: boolean }
-  ): Promise<string[]> {
+  /** ワーカーを用意し、認識文字を現在の設定にそろえる */
+  async function ensureWorker(): Promise<Worker> {
+    const Tesseract = await import("tesseract.js");
+    if (!ocrWorkerRef.current) {
+      camera.setStatusText("認識エンジン初期化中...（初回のみ時間がかかります）");
+      // legacy エンジン (OEM 0)。LSTM と違い文字単位の代替候補(choices)が
+      // 取得でき、等幅シリアルの誤読も少ない。言語データは約23MBで初回ロードが重い。
+      ocrWorkerRef.current = await Tesseract.createWorker(
+        "eng",
+        Tesseract.OEM.TESSERACT_ONLY,
+        {
+          // legacy 対応のコア／言語データを使用する
+          legacyCore: true,
+          legacyLang: true,
+          logger: (m) => {
+            if (m.status === "recognizing text") {
+              camera.setStatusText(
+                `OCR実行中... ${Math.round((m.progress ?? 0) * 100)}%`
+              );
+            }
+          },
+        }
+      );
+      appliedWhitelistRef.current = "";
+    }
+
+    const worker = ocrWorkerRef.current;
+    // 有効文字を変えたら、次の読み取りからワーカーにも反映する
+    if (appliedWhitelistRef.current !== whitelist) {
+      await worker.setParameters({
+        tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE,
+        tessedit_char_whitelist: whitelist,
+      });
+      appliedWhitelistRef.current = whitelist;
+    }
+    return worker;
+  }
+
+  async function readSerial(options?: { autoSave?: boolean }): Promise<string[]> {
+    // 読み取り中に呼ばれたら何もしない（手動と自動の重なり防止）
+    if (readingRef.current) return [];
+    readingRef.current = true;
+
     try {
       camera.setStatus("reading");
       const isAuto = options?.autoSave ?? false;
@@ -292,33 +435,7 @@ export default function SerialReaderPrototype() {
       setCandidates([]);
       setSelectedCandidate("");
 
-      const Tesseract = await import("tesseract.js");
-      if (!ocrWorkerRef.current) {
-        camera.setStatusText("認識エンジン初期化中...（初回のみ時間がかかります）");
-        // legacy エンジン (OEM 0)。LSTM と違い文字単位の代替候補(choices)が
-        // 取得でき、等幅シリアルの誤読も少ない。言語データは約23MBで初回ロードが重い。
-        const worker = await Tesseract.createWorker("eng", 0, {
-          // legacy 対応のコア／言語データを使用する
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          legacyCore: true,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          legacyLang: true,
-          logger: (m: { status: string; progress?: number }) => {
-            if (m.status === "recognizing text") {
-              camera.setStatusText(
-                `OCR実行中... ${Math.round((m.progress ?? 0) * 100)}%`
-              );
-            }
-          },
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (worker as any).setParameters({
-          tessedit_pageseg_mode: "7",
-          tessedit_char_whitelist: "3456789ABCDEFGHJKLMNPQRSTUVWXYZ",
-        });
-        ocrWorkerRef.current = worker;
-      }
+      const worker = await ensureWorker();
 
       const perPassSymbols: OcrSymbol[][] = [];
       const rawTexts: string[] = [];
@@ -335,58 +452,36 @@ export default function SerialReaderPrototype() {
         if (!firstSnapshot) firstSnapshot = snapshot;
 
         // blocks:true で文字単位(symbol)の確信度・代替候補を取得する
-        const result = await ocrWorkerRef.current.recognize(
-          snapshot,
-          {},
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          { blocks: true } as any
-        );
+        const result = await worker.recognize(snapshot, {}, { blocks: true });
         const data = result.data;
         rawTexts.push((data.text ?? "").trim());
-
-        // symbol 列を平坦化して取り出す
-        const syms: OcrSymbol[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const block of (data as any).blocks ?? []) {
-          for (const par of block.paragraphs ?? []) {
-            for (const line of par.lines ?? []) {
-              for (const word of line.words ?? []) {
-                for (const sym of word.symbols ?? []) {
-                  const ch = (sym.text ?? "").toUpperCase();
-                  if (!/[A-Z0-9]/.test(ch)) continue;
-                  syms.push({
-                    char: ch,
-                    conf: sym.confidence ?? 0,
-                    choices: (sym.choices ?? [])
-                      .map((c: { text?: string; confidence?: number }) => ({
-                        t: (c.text ?? "").toUpperCase(),
-                        cf: c.confidence ?? 0,
-                      }))
-                      .filter((c: { t: string }) => /^[A-Z0-9]$/.test(c.t)),
-                  });
-                }
-              }
-            }
-          }
-        }
-        perPassSymbols.push(syms);
+        perPassSymbols.push(collectSymbols(data.blocks));
       }
 
       if (firstSnapshot) setLastSnapshot(firstSnapshot);
       setRawText(rawTexts.filter(Boolean).join(" | ") || "(取得失敗)");
 
       // symbol 単位の確信度＋代替候補で投票集約（第二層の本体）
-      let found = aggregateBySymbols(perPassSymbols);
+      let found = aggregateBySymbols(perPassSymbols, rules);
 
       // 万一 symbol が取れない環境では、生テキストの文字列ベース集約に退避
       if (found.length === 0) {
         const fallback: string[] = [];
-        for (const t of rawTexts) fallback.push(...extractRawSerials(t));
-        found = aggregateCandidates(fallback);
+        for (const t of rawTexts) {
+          fallback.push(...extractRawSerials(t, rules.validChars));
+        }
+        found = aggregateCandidates(fallback, rules);
       }
 
       setCandidates(found);
       setSelectedCandidate(found[0] ?? "");
+
+      // 読み取り中にカメラが止められた場合は、停止状態のまま終える
+      if (!camera.streamRef.current) {
+        camera.setStatus("idle");
+        camera.setStatusText("カメラ停止中");
+        return found;
+      }
 
       if (isAuto && found[0]) {
         const saved = serialItems.saveCode(found[0], {
@@ -396,12 +491,13 @@ export default function SerialReaderPrototype() {
         camera.setStatusText(
           saved
             ? `自動保存: ${found[0]}`
-            : `同一コードをスキップ: ${found[0]}`
+            : `保存済みのためスキップ: ${found[0]}`
         );
       } else {
+        const priority = rules.suffix ? `（末尾${rules.suffix}優先）` : "";
         camera.setStatusText(
           found.length > 0
-            ? `候補 ${found.length} 件（末尾${CURRENT_SINGLE_SUFFIX}優先）`
+            ? `候補 ${found.length} 件${priority}`
             : "候補なし。位置を合わせ直してください。"
         );
       }
@@ -413,8 +509,94 @@ export default function SerialReaderPrototype() {
       camera.setStatus("error");
       camera.setStatusText("OCRに失敗しました");
       return [];
+    } finally {
+      readingRef.current = false;
     }
   }
+
+  // ─── 自動スキャン ──────────────────────────────────────────
+  //
+  // ループは「最新の値」を ref から読む。開始時点の値を閉じ込めないので、
+  // 連続スキャン中に枠・末尾・有効文字・間隔を変えても次の読み取りから反映され、
+  // オフにすれば読み取り中でも次の予約をしない。
+
+  const readSerialRef = useRef(readSerial);
+  readSerialRef.current = readSerial;
+  const autoScanEnabledRef = useRef(autoScanEnabled);
+  autoScanEnabledRef.current = autoScanEnabled;
+  const intervalRef = useRef(uiSettings.autoScanIntervalMs);
+  intervalRef.current = clampInterval(uiSettings.autoScanIntervalMs);
+
+  const autoScanTimerRef = useRef<number | null>(null);
+  /** ループが動いているか（二重起動の防止） */
+  const autoLoopActiveRef = useRef(false);
+  /** 停止のたびに増やす番号。古いループが後から再予約しないようにする */
+  const autoLoopGenRef = useRef(0);
+  const streamRef = camera.streamRef;
+
+  const stopAutoScan = useCallback(() => {
+    autoLoopGenRef.current += 1;
+    if (autoScanTimerRef.current !== null) {
+      window.clearTimeout(autoScanTimerRef.current);
+      autoScanTimerRef.current = null;
+    }
+    autoLoopActiveRef.current = false;
+    setIsAutoScanning(false);
+  }, []);
+
+  const startAutoScan = useCallback(() => {
+    if (autoLoopActiveRef.current) return;
+    autoLoopActiveRef.current = true;
+    setIsAutoScanning(true);
+
+    const generation = ++autoLoopGenRef.current;
+    const isCurrent = () => autoLoopGenRef.current === generation;
+    const shouldContinue = () =>
+      isCurrent() && autoScanEnabledRef.current && !!streamRef.current;
+
+    const finish = () => {
+      if (!isCurrent()) return;
+      autoLoopActiveRef.current = false;
+      setIsAutoScanning(false);
+    };
+
+    const loop = async () => {
+      autoScanTimerRef.current = null;
+      if (!shouldContinue()) return finish();
+
+      const found = await readSerialRef.current({ autoSave: true });
+      if (!shouldContinue()) return finish();
+
+      const interval = intervalRef.current;
+      const delay =
+        found.length > 0
+          ? interval
+          : Math.max(interval, AUTO_SCAN_EMPTY_DELAY_MS);
+      autoScanTimerRef.current = window.setTimeout(loop, delay);
+    };
+
+    autoScanTimerRef.current = window.setTimeout(loop, intervalRef.current);
+  }, [streamRef]);
+
+  useEffect(() => {
+    const cameraRunning =
+      camera.status === "ready" || camera.status === "reading";
+    if (autoScanEnabled && cameraRunning && streamRef.current) {
+      startAutoScan();
+    } else if (!autoScanEnabled || !cameraRunning) {
+      // starting 中は待つ。オフ・停止・エラーでは止める
+      if (camera.status !== "starting") stopAutoScan();
+    }
+  }, [autoScanEnabled, camera.status, streamRef, startAutoScan, stopAutoScan]);
+
+  // 画面を閉じるときの後片付け
+  useEffect(() => {
+    return () => {
+      stopAutoScan();
+      ocrWorkerRef.current?.terminate();
+      ocrWorkerRef.current = null;
+    };
+  }, [stopAutoScan]);
 
   // ─── イベントハンドラ ──────────────────────────────────────
 
@@ -448,24 +630,41 @@ export default function SerialReaderPrototype() {
             status={camera.status}
             statusText={camera.statusText}
             autoScanEnabled={autoScanEnabled}
-            autoScanIntervalMs={autoScanIntervalMs}
+            autoScanIntervalMs={uiSettings.autoScanIntervalMs}
             isAutoScanning={isAutoScanning}
-            showAdjuster={showAdjuster}
+            showAdjuster={uiSettings.showAdjuster}
             lastAutoSavedCode={serialItems.lastAutoSavedCode}
-            targetUrl={targetUrl}
+            formatSettings={formatSettings}
+            effectiveValidChars={whitelist}
             onStartCamera={camera.startCamera}
             onStopCamera={handleStopCamera}
             onReadSerial={() => readSerial()}
             onAutoScanChange={setAutoScanEnabled}
-            onIntervalChange={setAutoScanIntervalMs}
-            onToggleAdjuster={() => setShowAdjuster((v) => !v)}
-            onTargetUrlChange={setTargetUrl}
+            onIntervalChange={(ms) =>
+              setUiSettings((prev) => ({ ...prev, autoScanIntervalMs: ms }))
+            }
+            onIntervalCommit={() =>
+              setUiSettings((prev) => ({
+                ...prev,
+                autoScanIntervalMs: clampInterval(prev.autoScanIntervalMs),
+              }))
+            }
+            onToggleAdjuster={() =>
+              setUiSettings((prev) => ({
+                ...prev,
+                showAdjuster: !prev.showAdjuster,
+              }))
+            }
+            onFormatChange={(patch) =>
+              setFormatSettings((prev) => ({ ...prev, ...patch }))
+            }
+            onFormatReset={() => setFormatSettings(DEFAULT_FORMAT_SETTINGS)}
           />
 
-          {showAdjuster && (
+          {uiSettings.showAdjuster && (
             <CropAdjuster
               cropSettings={cropSettings}
-              onChange={setCropSettings}
+              onChange={updateCropSettings}
               onReset={() => setCropSettings(DEFAULT_CROP_SETTINGS)}
             />
           )}
@@ -494,7 +693,7 @@ export default function SerialReaderPrototype() {
               items={serialItems.items}
               duplicateSet={serialItems.duplicateSet}
               copiedMessage={serialItems.copiedMessage}
-              targetUrl={targetUrl}
+              targetUrl={formatSettings.targetUrl}
               onCopyCode={serialItems.copyCode}
               onCopyAll={serialItems.copyAll}
               onRemove={serialItems.removeItem}

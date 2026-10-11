@@ -539,3 +539,67 @@ input {
 }
   
 }
+
+/* ─── シングル設定（末尾・有効文字・応募URL） ─── */
+
+.format-panel {
+  margin-top: 12px;
+  background: #f8fafc;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.format-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 14px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  cursor: pointer;
+  text-align: left;
+}
+
+.format-summary {
+  margin-left: 10px;
+  font-weight: 400;
+  color: #475569;
+}
+
+.format-body {
+  display: grid;
+  gap: 14px;
+  padding: 0 14px 14px;
+}
+
+.format-field {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.format-label {
+  font-weight: 700;
+  color: #334155;
+}
+
+.format-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+  word-break: break-all;
+}
+
+.format-warning {
+  font-size: 12px;
+  color: #b45309;
+}
+
+.format-body > .btn {
+  justify-self: start;
+}

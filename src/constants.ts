@@ -1,25 +1,87 @@
 import type { CropSettings } from "./types";
 
 export const SERIAL_REGEX = /[A-Z0-9]{13}/g;
-export const FIXED_SUFFIX = "T";
-/** シングルごとに変わる末尾パターン（将来 UI で可変にする想定） */
-export const CURRENT_SINGLE_SUFFIX = "WT";
+export const SERIAL_LENGTH = 13;
 export const STORAGE_KEY = "serial-reader-items";
 export const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
+/** シングルごとの設定（末尾・有効文字・応募URL） */
+export const FORMAT_SETTINGS_KEY = "serial-reader-format-settings";
+/** 画面まわりの設定（連続スキャン間隔・調整パネルの表示） */
+export const UI_SETTINGS_KEY = "serial-reader-ui-settings";
 
 /**
- * 実物のシリアル番号で使われている文字セット:
- *   数字: 3 4 5 6 7 8 9  （0, 1, 2 は未使用）
- *   英字: A-H, J-N, P-Z  （I, O は未使用）
+ * シングルごとに変わる読み取り条件。
+ * 末尾はシングルごとに違い（14th は 9V、15th は WT）、
+ * 使われる文字も前提どおりとは限らない（15th には数字の 2 がある）ため、
+ * コードに直書きせず画面から変えられるようにしている。
  */
-export const VALID_CHARS = new Set("3456789ABCDEFGHJKLMNPQRSTUVWXYZ".split(""));
+export type FormatSettings = {
+  /** シリアルの末尾。一致した候補を優先する。空なら末尾の加点なし */
+  suffix: string;
+  /** シリアルに使われる文字。OCR の認識文字・正規化・採点に使う */
+  validChars: string;
+  /** 応募サイトの URL */
+  targetUrl: string;
+};
+
+/** 0・1・I・O を除いた英数字。15th の実物に 2 があるため 2 は含める */
+export const DEFAULT_VALID_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+/** 初期値は 15th シングル「Lonesome rabbit / What's "KAZOKU"?」 */
+export const DEFAULT_FORMAT_SETTINGS: FormatSettings = {
+  suffix: "WT",
+  validChars: DEFAULT_VALID_CHARS,
+  targetUrl: "https://ticket.fortunemeets.app/sakurazaka46/15th#/",
+};
+
+export type UiSettings = {
+  autoScanIntervalMs: number;
+  showAdjuster: boolean;
+};
+
+export const DEFAULT_UI_SETTINGS: UiSettings = {
+  autoScanIntervalMs: 1200,
+  showAdjuster: true,
+};
+
+export const AUTO_SCAN_INTERVAL_MIN = 800;
+export const AUTO_SCAN_INTERVAL_MAX = 5000;
+/** 候補が出なかったときの最短待ち時間 */
+export const AUTO_SCAN_EMPTY_DELAY_MS = 1600;
+
+/** 入力された末尾を英大文字・数字だけに整える（最大 12 文字） */
+export function sanitizeSuffix(value: string): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, SERIAL_LENGTH - 1);
+}
+
+/** 入力された有効文字を英大文字・数字だけにし、重複を除いて並べ替える */
+export function sanitizeValidChars(value: string): string {
+  const chars = new Set(value.toUpperCase().replace(/[^A-Z0-9]/g, ""));
+  return [...chars].sort().join("");
+}
+
+/**
+ * 実際に使う有効文字の集合。
+ * 空のときは全滅を避けるため初期値を使い、末尾の文字は必ず含める
+ * （末尾に有効文字外の文字があると、末尾一致の候補が出なくなるため）。
+ */
+export function resolveValidChars(settings: FormatSettings): Set<string> {
+  const base = sanitizeValidChars(settings.validChars) || DEFAULT_VALID_CHARS;
+  return new Set([...base, ...sanitizeSuffix(settings.suffix)]);
+}
 
 /**
  * OCR で互いに混同されやすい文字ペア（実測データより）。
  * 両方とも有効文字なので、Tesseract のホワイトリストだけでは解決できない。
  * 位置ごとに両方の可能性を展開して候補を生成する。
+ * 有効文字に含まれない文字への展開は ocr.ts 側で除外する。
  */
 export const CONFUSION_PAIRS: Record<string, string[]> = {
+  Z: ["Z", "2"],
+  "2": ["2", "Z"],
   S: ["S", "5"],
   "5": ["5", "S"],
   "9": ["9", "P", "S", "G"],
@@ -79,25 +141,57 @@ export const DEFAULT_CROP_SETTINGS: CropSettings = {
   threshold: 120,
 };
 
-export const BOOKMARKLET_CODE = [
-  "javascript:void(async function(){",
-  "try{",
-  "var text;",
-  "try{text=await navigator.clipboard.readText()}",
-  'catch(e){text=window.prompt("シリアルを貼り付けてください（改行区切り）")}',
-  'if(!text){alert("入力がありません");return}',
-  "var serials=text.split(/[\\n\\s,;]+/).map(function(s){return s.trim()}).filter(function(s){return /^[A-Z0-9]{13}$/.test(s)}).slice(0,10);",
-  'if(serials.length===0){alert("有効なシリアルが見つかりませんでした");return}',
-  "var inputs=Array.from(document.querySelectorAll('input[type=\"text\"],input:not([type])')).filter(function(el){var st=getComputedStyle(el);return st.display!==\"none\"&&st.visibility!==\"hidden\"&&el.offsetParent!==null});",
-  'if(inputs.length===0){alert("入力欄が見つかりませんでした");return}',
-  "var f=0;",
-  "for(var i=0;i<serials.length&&i<inputs.length;i++){",
-  "var inp=inputs[i];",
-  'Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set.call(inp,serials[i]);',
-  'inp.dispatchEvent(new Event("input",{bubbles:true}));',
-  'inp.dispatchEvent(new Event("change",{bubbles:true}));',
-  "f++}",
-  'alert(f+"件入力しました")',
-  '}catch(e){alert("失敗しました: "+e.message)}',
-  "}())",
-].join("");
+/**
+ * 応募サイトで実行するブックマークレットの本体。
+ * 改行ごとに前後の空白を詰めて 1 行の javascript: URL にするため、
+ * 文は必ずセミコロンで終え、行コメントや「%」「#」は使わないこと。
+ *
+ * 入力欄の選び方:
+ *   1. 画面に見えていて書き込める text / tel / search の入力欄を集める
+ *   2. そのうち maxlength=13、または name・id・placeholder・ラベルに
+ *      「serial」「シリアル」「応募券」「code」「コード」を含む欄があれば、それだけを使う
+ *      （検索窓や氏名欄に入ってしまうのを防ぐ）
+ *   3. 対象の欄に空欄があれば空欄だけに入れる（11 件目以降を後から足せるように）
+ */
+const BOOKMARKLET_SOURCE = `
+(async function(){
+try{
+var text;
+try{text=await navigator.clipboard.readText();}
+catch(e){text=window.prompt("シリアルを貼り付けてください（改行区切り）");}
+if(!text){alert("入力がありません");return;}
+var seen={};
+var serials=text.split(/[\\n\\s,;]+/).map(function(s){return s.trim().toUpperCase();}).filter(function(s){if(!/^[A-Z0-9]{13}$/.test(s)||seen[s])return false;seen[s]=true;return true;});
+if(serials.length===0){alert("有効なシリアルが見つかりませんでした");return;}
+var all=Array.from(document.querySelectorAll("input")).filter(function(el){var t=(el.getAttribute("type")||"text").toLowerCase();if(["text","tel","search"].indexOf(t)<0)return false;if(el.disabled||el.readOnly)return false;var st=getComputedStyle(el);return st.display!=="none"&&st.visibility!=="hidden"&&el.offsetParent!==null;});
+if(all.length===0){alert("入力欄が見つかりませんでした");return;}
+var label=function(el){var l=el.labels&&el.labels[0]?el.labels[0].textContent:"";return [el.name,el.id,el.placeholder,el.getAttribute("aria-label"),l].join(" ");};
+var hit=all.filter(function(el){return el.maxLength===13||/serial|シリアル|応募券|code|コード/i.test(label(el));});
+var targets=hit.length>0?hit:all;
+var empty=targets.filter(function(el){return !el.value;});
+if(empty.length>0)targets=empty;
+var setter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,"value").set;
+var f=0;
+for(var i=0;i<serials.length&&i<targets.length;i++){
+var inp=targets[i];
+setter.call(inp,serials[i]);
+inp.dispatchEvent(new Event("input",{bubbles:true}));
+inp.dispatchEvent(new Event("change",{bubbles:true}));
+f++;
+}
+var rest=serials.length-f;
+var msg=f+"件入力しました";
+if(hit.length===0)msg+="\\n（シリアル欄を特定できなかったため、ページ内の入力欄に上から入れました。位置を確認してください）";
+if(rest>0)msg+="\\n入りきらなかったシリアルが"+rest+"件あります";
+alert(msg);
+}catch(e){alert("失敗しました: "+e.message);}
+}());
+`;
+
+export const BOOKMARKLET_CODE =
+  "javascript:void" +
+  BOOKMARKLET_SOURCE.trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .join("")
+    .replace(/;$/, "");

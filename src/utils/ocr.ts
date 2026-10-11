@@ -1,18 +1,38 @@
 import {
   SERIAL_REGEX,
-  FIXED_SUFFIX,
-  CURRENT_SINGLE_SUFFIX,
-  VALID_CHARS,
   CONFUSION_PAIRS,
   MAX_DISPLAY_CANDIDATES,
 } from "../constants";
 
 /**
- * OCR 生テキストの前処理。
- * 無効文字（0,1,2,I,O）を形状が近い有効文字に確定変換する。
+ * 候補の判定に使う、シングルごとのルール。
+ * App 側で FormatSettings から作って渡す。
  */
-export function normalizeText(text: string): string {
-  return text
+export type SerialRules = {
+  /** 末尾（空文字なら末尾の加点なし） */
+  suffix: string;
+  /** 有効文字の集合 */
+  validChars: Set<string>;
+};
+
+/**
+ * 有効文字に含まれないときだけ、形が近い文字へ置き換える対応表。
+ * 例: 2 が有効文字なら 2 はそのまま残し、無効なら Z にする。
+ */
+const LOOKALIKE_FALLBACK: [string, string][] = [
+  ["0", "D"],
+  ["1", "L"],
+  ["2", "Z"],
+  ["O", "D"],
+  ["I", "J"],
+];
+
+/**
+ * OCR 生テキストの前処理。
+ * 0・1・2・I・O は、有効文字に含まれない場合だけ形状が近い文字に確定変換する。
+ */
+export function normalizeText(text: string, validChars: Set<string>): string {
+  let s = text
     .toUpperCase()
     .replace(/[Ａ-Ｚ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
     .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
@@ -22,13 +42,14 @@ export function normalizeText(text: string): string {
     .replace(/[{}[\]]/g, "")
     .replace(/[#]/g, "H")
     .replace(/[@]/g, "A")
-    .replace(/[&]/g, "8")
-    // 無効文字の確定変換
-    .replace(/0/g, "D")
-    .replace(/1/g, "L")
-    .replace(/2/g, "Z")
-    .replace(/O/g, "D")
-    .replace(/I/g, "J")
+    .replace(/[&]/g, "8");
+
+  // 無効文字の確定変換（有効文字に入っている文字は変換しない）
+  for (const [from, to] of LOOKALIKE_FALLBACK) {
+    if (!validChars.has(from)) s = s.split(from).join(to);
+  }
+
+  return s
     // 空白・区切り文字を除去
     .replace(/[\s\-—_\.,:;'"`~]/g, "")
     // 英数字以外 → スペース
@@ -39,12 +60,18 @@ export function normalizeText(text: string): string {
  * 13 桁の候補に対して、曖昧な位置を展開し全バリアントを生成する。
  * 候補数爆発を防ぐため最大 64 個に制限。
  */
-export function expandAmbiguous(code: string): string[] {
+export function expandAmbiguous(
+  code: string,
+  validChars: Set<string>
+): string[] {
   const MAX_VARIANTS = 64;
   let results = [""];
 
   for (const ch of code) {
-    const alternatives = CONFUSION_PAIRS[ch] ?? [ch];
+    // 有効文字にない文字への展開は作らない（元の文字は必ず残す）
+    const alternatives = (CONFUSION_PAIRS[ch] ?? [ch]).filter(
+      (alt) => alt === ch || validChars.has(alt)
+    );
     const next: string[] = [];
     for (const prefix of results) {
       for (const alt of alternatives) {
@@ -61,6 +88,7 @@ export function expandAmbiguous(code: string): string[] {
 
 export function scoreCandidate(
   code: string,
+  rules: SerialRules,
   occurrenceCount = 0,
   isVoted = false
 ): number {
@@ -68,14 +96,11 @@ export function scoreCandidate(
 
   if (/^[A-Z0-9]{13}$/.test(code)) score += 100;
 
-  // 末尾 "V"（歴代共通）
-  if (code.endsWith(FIXED_SUFFIX)) score += 80;
-
-  // 末尾 "9V"（今回のシングル固有）
-  if (code.endsWith(CURRENT_SINGLE_SUFFIX)) score += 100;
+  // 末尾が設定値と一致（シングルごとに違うため、設定から受け取る）
+  if (rules.suffix && code.endsWith(rules.suffix)) score += 100;
 
   // 有効文字セットのみで構成
-  const allValid = [...code].every((ch) => VALID_CHARS.has(ch));
+  const allValid = [...code].every((ch) => rules.validChars.has(ch));
   if (allValid) score += 80;
 
   // 数字・アルファベット混在
@@ -98,8 +123,11 @@ export function scoreCandidate(
  * OCR テキストから 13 桁の生候補を抽出する（曖昧展開はしない）。
  * 多パス OCR では各パスのテキストに対してこれを呼び、結果をまとめて集約する。
  */
-export function extractRawSerials(text: string): string[] {
-  const normalized = normalizeText(text);
+export function extractRawSerials(
+  text: string,
+  validChars: Set<string>
+): string[] {
+  const normalized = normalizeText(text, validChars);
   const rawCandidates = new Set<string>();
 
   const directMatches = normalized.match(SERIAL_REGEX) ?? [];
@@ -150,7 +178,10 @@ export function voteByPosition(rawCandidates: string[]): string | null {
  * 多パスの生候補リストから、位置投票＋曖昧文字展開＋スコアリングで
  * 最終候補リストを生成する。
  */
-export function aggregateCandidates(rawCandidatesAllPasses: string[]): string[] {
+export function aggregateCandidates(
+  rawCandidatesAllPasses: string[],
+  rules: SerialRules
+): string[] {
   // 生候補の出現回数を集計（複数パスで一致したら高信頼）
   const occurrence = new Map<string, number>();
   for (const raw of rawCandidatesAllPasses) {
@@ -166,22 +197,22 @@ export function aggregateCandidates(rawCandidatesAllPasses: string[]): string[] 
   const scored = new Map<string, number>();
 
   for (const [raw, count] of occurrence.entries()) {
-    const variants = expandAmbiguous(raw);
+    const variants = expandAmbiguous(raw, rules.validChars);
     for (const v of variants) {
       // 元の生候補と一致するバリアントには出現回数を反映
       const matchedOccurrence = v === raw ? count : 0;
       const isVoted = votedSet.has(v);
-      const s = scoreCandidate(v, matchedOccurrence, isVoted);
+      const s = scoreCandidate(v, rules, matchedOccurrence, isVoted);
       scored.set(v, Math.max(scored.get(v) ?? 0, s));
     }
   }
 
   // 投票結果も独立して評価（生候補に含まれない可能性があるため）
   if (voted) {
-    const variants = expandAmbiguous(voted);
+    const variants = expandAmbiguous(voted, rules.validChars);
     for (const v of variants) {
       const isVoted = v === voted;
-      const s = scoreCandidate(v, occurrence.get(v) ?? 0, isVoted);
+      const s = scoreCandidate(v, rules, occurrence.get(v) ?? 0, isVoted);
       scored.set(v, Math.max(scored.get(v) ?? 0, s));
     }
   }
@@ -195,8 +226,11 @@ export function aggregateCandidates(rawCandidatesAllPasses: string[]): string[] 
 /**
  * 単一のテキストから候補を生成する後方互換用ラッパー。
  */
-export function extractSerialCandidates(text: string): string[] {
-  return aggregateCandidates(extractRawSerials(text));
+export function extractSerialCandidates(
+  text: string,
+  rules: SerialRules
+): string[] {
+  return aggregateCandidates(extractRawSerials(text, rules.validChars), rules);
 }
 
 // ─── 第二層: legacy エンジンの symbol 単位データを使った集約 ──────────────
@@ -219,7 +253,10 @@ const EDGE_NOISE_CONF = 40;
  * legacy は PSM 7 で行の前後にゴミ（低確信の枠線など）を拾うため、
  * 単純な先頭/末尾切り出しではなく、最も「文字らしい」13 連続を探す。
  */
-export function bestSerialWindow(symbols: OcrSymbol[]): OcrSymbol[] | null {
+export function bestSerialWindow(
+  symbols: OcrSymbol[],
+  suffix: string
+): OcrSymbol[] | null {
   // 端の極端に低確信な文字をまず削る（中間は残す）
   let s = [...symbols];
   while (s.length > 13 && s[0].conf < EDGE_NOISE_CONF) s.shift();
@@ -233,10 +270,13 @@ export function bestSerialWindow(symbols: OcrSymbol[]): OcrSymbol[] | null {
   for (let i = 0; i + 13 <= s.length; i++) {
     const win = s.slice(i, i + 13);
     let score = win.reduce((a, x) => a + x.conf, 0);
-    // 末尾サフィックス（WT 等）が窓の末尾に来る並びを優遇
-    const tail = win.map((x) => x.char).join("");
-    if (tail.endsWith(CURRENT_SINGLE_SUFFIX)) score += 300;
-    else if (tail.endsWith(FIXED_SUFFIX)) score += 150;
+    // 末尾サフィックス（WT 等）が窓の末尾に来る並びを優遇。
+    // 全体が一致しなくても、最後の 1 文字が合えば少し優遇する。
+    if (suffix) {
+      const tail = win.map((x) => x.char).join("");
+      if (tail.endsWith(suffix)) score += 300;
+      else if (tail.endsWith(suffix.slice(-1))) score += 150;
+    }
     if (score > bestScore) {
       bestScore = score;
       best = win;
@@ -258,10 +298,11 @@ export function bestSerialWindow(symbols: OcrSymbol[]): OcrSymbol[] | null {
  * 「エンジンが実際に挙げた候補」で曖昧さを解消できる。
  */
 export function aggregateBySymbols(
-  perPassSymbols: OcrSymbol[][]
+  perPassSymbols: OcrSymbol[][],
+  rules: SerialRules
 ): string[] {
   const windows = perPassSymbols
-    .map(bestSerialWindow)
+    .map((syms) => bestSerialWindow(syms, rules.suffix))
     .filter((w): w is OcrSymbol[] => w !== null);
 
   if (windows.length === 0) return [];
@@ -280,7 +321,10 @@ export function aggregateBySymbols(
         score.set(ch, (score.get(ch) ?? 0) + v);
       add(sym.char, sym.conf);
       for (const c of sym.choices) {
-        if (c.t !== sym.char) add(c.t, c.cf * CHOICE_WEIGHT);
+        // 有効文字にない代替候補は数えない
+        if (c.t !== sym.char && rules.validChars.has(c.t)) {
+          add(c.t, c.cf * CHOICE_WEIGHT);
+        }
       }
     }
     perPosition.push(score);
@@ -325,7 +369,7 @@ export function aggregateBySymbols(
   // scoreCandidate で順位付け（末尾サフィックス・有効文字などを加味）
   const scored = [...candidates].map((code) => {
     const isVoted = code === votedCode;
-    return { code, score: scoreCandidate(code, 0, isVoted) };
+    return { code, score: scoreCandidate(code, rules, 0, isVoted) };
   });
 
   return scored
