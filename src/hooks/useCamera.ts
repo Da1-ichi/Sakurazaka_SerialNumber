@@ -26,7 +26,8 @@ export function useCamera() {
       setStatus("starting");
       setStatusText("カメラ起動中...");
 
-      stopCamera();
+      // 二重起動の防止。状態は starting のまま映像だけ止める
+      releaseStream();
 
       // 解像度はできるだけ高く要求する（ideal なので非対応端末は自動で下がる）。
       // 文字あたりのピクセル数が増えるほど OCR 精度が上がるため、
@@ -99,13 +100,27 @@ export function useCamera() {
     }
   }
 
-  function stopCamera() {
+  /** 映像のトラックを止めて手放す（状態は変えない） */
+  function releaseStream() {
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
         track.stop();
       }
       streamRef.current = null;
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }
+
+  /**
+   * カメラを止める。状態を idle に戻し、停止後にシャッターを押せないようにする。
+   * 読み取り中に止めた場合も、読み取り側が終了時に idle を保つ（App 側で処理）。
+   */
+  function stopCamera() {
+    releaseStream();
+    setStatus("idle");
+    setStatusText("カメラ停止中");
   }
 
   return {

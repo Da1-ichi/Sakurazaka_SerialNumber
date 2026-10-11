@@ -1,27 +1,36 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SerialItem } from "../types";
 import { STORAGE_KEY } from "../constants";
 
+/** localStorage から保存済み一覧を読む。壊れていれば空にする */
+function loadItems(): SerialItem[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return [];
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? (parsed as SerialItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function useSerialItems() {
-  const [items, setItems] = useState<SerialItem[]>([]);
+  // 初回描画の時点で読み込む（空の一覧で上書き保存してしまうのを防ぐ）
+  const [items, setItems] = useState<SerialItem[]>(loadItems);
   const [copiedMessage, setCopiedMessage] = useState("");
   const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
 
-  // localStorage から復元
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        setItems(JSON.parse(saved) as SerialItem[]);
-      } catch {
-        // ignore
-      }
-    }
-  }, []);
+  // 連続スキャンのループなど、描画をまたいで呼ばれても最新の一覧で判定するための参照
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
 
   // localStorage へ同期
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    } catch {
+      // 容量超過などは無視（画面上の一覧は残る）
+    }
   }, [items]);
 
   // コピーメッセージ自動消去
@@ -41,6 +50,14 @@ export function useSerialItems() {
     );
   }, [items]);
 
+  /**
+   * コードを保存する。保存したら true、しなかったら false を返す。
+   *
+   * 重複の扱い（二重応募を防ぐため、一覧全体と照合する）:
+   *   - 自動保存: 一覧のどこかに同じコードがあればスキップ
+   *   - 手動保存: 同じコードがあれば確認を出し、OK のときだけ保存
+   *     （silent のときは確認を出さずにスキップ）
+   */
   function saveCode(
     code: string,
     options?: { silent?: boolean; isAuto?: boolean }
@@ -48,28 +65,34 @@ export function useSerialItems() {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return false;
 
-    let didSave = false;
+    const current = itemsRef.current;
+    const exists = current.some((item) => item.code === trimmed);
 
-    setItems((prev) => {
-      if (prev[0]?.code === trimmed) {
-        return prev;
-      }
-      didSave = true;
-      return [
-        {
-          id: crypto.randomUUID(),
-          code: trimmed,
-          createdAt: new Date().toISOString(),
-        },
-        ...prev,
-      ];
-    });
+    if (exists) {
+      if (options?.isAuto || options?.silent) return false;
+      const ok = window.confirm(
+        `${trimmed} はすでに保存されています。もう一度保存しますか？`
+      );
+      if (!ok) return false;
+    }
 
-    if (didSave && options?.isAuto) {
+    const next: SerialItem[] = [
+      {
+        id: crypto.randomUUID(),
+        code: trimmed,
+        createdAt: new Date().toISOString(),
+      },
+      ...current,
+    ];
+    // 次の描画を待たずに参照を更新し、続けて呼ばれても重複判定が効くようにする
+    itemsRef.current = next;
+    setItems(next);
+
+    if (options?.isAuto) {
       setLastAutoSavedCode(trimmed);
     }
 
-    return didSave;
+    return true;
   }
 
   function addSelected(candidate: string): boolean {
