@@ -97,6 +97,20 @@ export const CONFUSION_PAIRS: Record<string, string[]> = {
 /** 画像拡大倍率。Tesseract は文字が大きいほど精度が上がる */
 export const UPSCALE_FACTOR = 3;
 
+/**
+ * OCR に渡す画像の幅の上限（画素）。
+ * 4K 映像を 3 倍にすると幅が数千画素になり、スマホではメモリ不足で
+ * 認識エンジンが落ちることがある。文字の大きさとしても十分なので、
+ * これを超える場合は拡大倍率を下げる（元の大きさより小さくはしない）。
+ */
+export const MAX_OCR_IMAGE_WIDTH = 2400;
+
+/**
+ * 認識エンジンの準備（初回は約23MBのダウンロードを含む）を待つ上限。
+ * これを超えたら失敗として扱い、もう一度読み取れるようにする。
+ */
+export const WORKER_INIT_TIMEOUT_MS = 120_000;
+
 /** 表示する候補の最大件数（多すぎると選びにくいので絞る） */
 export const MAX_DISPLAY_CANDIDATES = 10;
 

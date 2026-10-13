@@ -14,6 +14,8 @@ import {
   FORMAT_SETTINGS_KEY,
   UI_SETTINGS_KEY,
   UPSCALE_FACTOR,
+  MAX_OCR_IMAGE_WIDTH,
+  WORKER_INIT_TIMEOUT_MS,
   QUICK_PASSES,
   ACCURATE_PASSES,
   resolveValidChars,
@@ -286,13 +288,19 @@ export default function SerialReaderPrototype() {
     const cropX = Math.floor(sx + sw * crop.x);
     const cropY = Math.floor(sy + sh * crop.y);
 
-    const outW = cropWidth * UPSCALE_FACTOR;
-    const outH = cropHeight * UPSCALE_FACTOR;
+    // 拡大倍率は基本 3 倍。ただし画像が大きくなりすぎる場合は抑える
+    const scale = Math.max(
+      1,
+      Math.min(UPSCALE_FACTOR, MAX_OCR_IMAGE_WIDTH / cropWidth)
+    );
+    const outW = Math.round(cropWidth * scale);
+    const outH = Math.round(cropHeight * scale);
 
     canvas.width = outW;
     canvas.height = outH;
 
-    const ctx = canvas.getContext("2d");
+    // 画素を何度も読み出すので willReadFrequently を指定する
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
 
     ctx.imageSmoothingEnabled = true;
@@ -384,9 +392,30 @@ export default function SerialReaderPrototype() {
     const Tesseract = await import("tesseract.js");
     if (!ocrWorkerRef.current) {
       camera.setStatusText("認識エンジン初期化中...（初回のみ時間がかかります）");
+
+      // tesseract.js 5.1.1 は、認識データ（約23MB）のダウンロードに失敗しても
+      // createWorker がエラーを返さず止まったままになる不具合がある。
+      // errorHandler でエラーを受け取り、さらに待ち時間の上限を設けて抜け出す。
+      let rejectInit: (reason: Error) => void = () => {};
+      const initFailed = new Promise<never>((_, reject) => {
+        rejectInit = reject;
+      });
+      let timeoutId = 0;
+      const initTimeout = new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(
+          () =>
+            reject(
+              new Error(
+                `${WORKER_INIT_TIMEOUT_MS / 1000}秒たっても準備が終わりませんでした`
+              )
+            ),
+          WORKER_INIT_TIMEOUT_MS
+        );
+      });
+
       // legacy エンジン (OEM 0)。LSTM と違い文字単位の代替候補(choices)が
       // 取得でき、等幅シリアルの誤読も少ない。言語データは約23MBで初回ロードが重い。
-      ocrWorkerRef.current = await Tesseract.createWorker(
+      const creating = Tesseract.createWorker(
         "eng",
         Tesseract.OEM.TESSERACT_ONLY,
         {
@@ -394,14 +423,37 @@ export default function SerialReaderPrototype() {
           legacyCore: true,
           legacyLang: true,
           logger: (m) => {
+            const pct = Math.round((m.progress ?? 0) * 100);
             if (m.status === "recognizing text") {
+              camera.setStatusText(`OCR実行中... ${pct}%`);
+            } else if (m.status === "loading language traineddata") {
               camera.setStatusText(
-                `OCR実行中... ${Math.round((m.progress ?? 0) * 100)}%`
+                `認識データを読み込み中... ${pct}%（初回のみ約23MB）`
               );
             }
           },
+          // 準備中・認識中のエラーを受け取る（指定しないと例外が投げっぱなしになる）
+          errorHandler: (e) => {
+            rejectInit(new Error(String(e)));
+          },
         }
       );
+
+      let settled = false;
+      try {
+        ocrWorkerRef.current = await Promise.race([
+          creating,
+          initFailed,
+          initTimeout,
+        ]);
+        settled = true;
+      } finally {
+        window.clearTimeout(timeoutId);
+        // 失敗・時間切れの後で準備が終わったワーカーは使わずに閉じる
+        if (!settled) {
+          creating.then((w) => w.terminate()).catch(() => {});
+        }
+      }
       appliedWhitelistRef.current = "";
     }
 
@@ -417,10 +469,24 @@ export default function SerialReaderPrototype() {
     return worker;
   }
 
+  /** 壊れた可能性のあるワーカーを捨て、次の読み取りで作り直させる */
+  async function discardWorker() {
+    const worker = ocrWorkerRef.current;
+    ocrWorkerRef.current = null;
+    appliedWhitelistRef.current = "";
+    try {
+      await worker?.terminate();
+    } catch {
+      // すでに落ちている場合は無視
+    }
+  }
+
   async function readSerial(options?: { autoSave?: boolean }): Promise<string[]> {
     // 読み取り中に呼ばれたら何もしない（手動と自動の重なり防止）
     if (readingRef.current) return [];
     readingRef.current = true;
+    /** どの段階で失敗したかを表示するための目印 */
+    let stage: "init" | "recognize" | "aggregate" = "init";
 
     try {
       camera.setStatus("reading");
@@ -436,6 +502,7 @@ export default function SerialReaderPrototype() {
       setSelectedCandidate("");
 
       const worker = await ensureWorker();
+      stage = "recognize";
 
       const perPassSymbols: OcrSymbol[][] = [];
       const rawTexts: string[] = [];
@@ -458,6 +525,7 @@ export default function SerialReaderPrototype() {
         perPassSymbols.push(collectSymbols(data.blocks));
       }
 
+      stage = "aggregate";
       if (firstSnapshot) setLastSnapshot(firstSnapshot);
       setRawText(rawTexts.filter(Boolean).join(" | ") || "(取得失敗)");
 
@@ -506,8 +574,30 @@ export default function SerialReaderPrototype() {
       return found;
     } catch (error) {
       console.error(error);
-      camera.setStatus("error");
-      camera.setStatusText("OCRに失敗しました");
+      // 失敗したワーカーは使い回さない（使い回すと以降も失敗し続けるため）
+      await discardWorker();
+
+      const stageLabel = {
+        init: "認識エンジンの準備",
+        recognize: "文字の認識",
+        aggregate: "候補の集計",
+      }[stage];
+      const reason = (
+        error instanceof Error ? error.message : String(error ?? "")
+      ).slice(0, 120);
+      const hint =
+        stage === "init"
+          ? "通信状況を確認して、もう一度読み取ってください。"
+          : "もう一度読み取ってください。";
+      // 連続スキャン中なら止める（失敗のたびにエンジンを作り直し続けないように）
+      const isAuto = options?.autoSave ?? false;
+      if (isAuto) setAutoScanEnabled(false);
+      camera.setStatusText(
+        `OCRに失敗しました（${stageLabel}${reason ? `: ${reason}` : ""}）。${hint}` +
+          (isAuto ? "連続スキャンは停止しました。" : "")
+      );
+      // カメラが動いていれば、そのまま再試行できる状態に戻す
+      camera.setStatus(camera.streamRef.current ? "ready" : "idle");
       return [];
     } finally {
       readingRef.current = false;
