@@ -4,7 +4,7 @@ export const SERIAL_REGEX = /[A-Z0-9]{13}/g;
 export const SERIAL_LENGTH = 13;
 export const STORAGE_KEY = "serial-reader-items";
 export const CROP_SETTINGS_KEY = "serial-reader-crop-settings";
-/** シングルごとの設定（末尾・有効文字・応募URL） */
+/** シングルごとの設定（末尾・有効文字・何枚目） */
 export const FORMAT_SETTINGS_KEY = "serial-reader-format-settings";
 /** 画面まわりの設定（連続スキャン間隔・調整パネルの表示） */
 export const UI_SETTINGS_KEY = "serial-reader-ui-settings";
@@ -20,8 +20,8 @@ export type FormatSettings = {
   suffix: string;
   /** シリアルに使われる文字。OCR の認識文字・正規化・採点に使う */
   validChars: string;
-  /** 応募サイトの URL */
-  targetUrl: string;
+  /** 何枚目のシングルか。応募ページの URL はここから作る */
+  singleNumber: number;
 };
 
 /** 0・1・I・O を除いた英数字。15th の実物に 2 があるため 2 は含める */
@@ -31,8 +31,46 @@ export const DEFAULT_VALID_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 export const DEFAULT_FORMAT_SETTINGS: FormatSettings = {
   suffix: "WT",
   validChars: DEFAULT_VALID_CHARS,
-  targetUrl: "https://ticket.fortunemeets.app/sakurazaka46/15th#/",
+  singleNumber: 15,
 };
+
+export const SINGLE_NUMBER_MIN = 1;
+export const SINGLE_NUMBER_MAX = 99;
+
+/** 英語の序数の接尾辞（1st・2nd・3rd・11th・21st …） */
+function ordinalSuffix(n: number): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return "th";
+  switch (n % 10) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+/** シングルの枚数を有効な整数にそろえる。不正なら null */
+export function sanitizeSingleNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(n)) return null;
+  if (n < SINGLE_NUMBER_MIN || n > SINGLE_NUMBER_MAX) return null;
+  return n;
+}
+
+/** 例: 15 → https://ticket.fortunemeets.app/sakurazaka46/15th#/ */
+export function buildTargetUrl(singleNumber: number): string {
+  return `https://ticket.fortunemeets.app/sakurazaka46/${singleNumber}${ordinalSuffix(singleNumber)}#/`;
+}
+
+/** 旧設定の応募 URL から枚数を取り出す（移行用） */
+export function singleNumberFromUrl(url: string): number | null {
+  const m = url.match(/\/sakurazaka46\/(\d+)(?:st|nd|rd|th)\b/);
+  return m ? sanitizeSingleNumber(Number(m[1])) : null;
+}
 
 export type UiSettings = {
   autoScanIntervalMs: number;
