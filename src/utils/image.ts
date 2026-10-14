@@ -1,6 +1,5 @@
 /**
  * 画像処理の共通部品（canvas に依存しない、グレースケール配列の処理）。
- * カメラ枠の読み取りと、写真からのまとめ読みの両方で使う。
  */
 
 /** 1 画素 1 バイトのグレースケール画像 */
@@ -82,17 +81,16 @@ export function adaptiveBinarize(
 }
 
 /**
- * OCR 用の前処理（カメラ枠の読み取りと同じ手順）。
+ * OCR・字形の照合用の前処理。
  *   1. コントラスト強調
- *   2. 二値化（adaptive: 局所適応 / global: 固定しきい値）
- * threshold は調整パネルのしきい値スライダー、thresholdOffset はパスごとの増減。
+ *   2. 局所適応二値化（影・照明ムラに強い）
+ * threshold は全体の濃さの調整（120 が標準）、thresholdOffset はパスごとの増減。
  */
 export function preprocessForOcr(
   gray: GrayImage,
   options: {
     threshold: number;
     thresholdOffset?: number;
-    method?: "adaptive" | "global";
   }
 ): GrayImage {
   const { width: w, height: h } = gray;
@@ -105,17 +103,8 @@ export function preprocessForOcr(
   }
   const enhanced = { width: w, height: h, data: contrast };
 
-  // Step 2: 二値化
-  if (options.method === "global") {
-    const threshold = options.threshold + thresholdOffset;
-    const out = new Uint8ClampedArray(w * h);
-    for (let p = 0; p < out.length; p++) {
-      out[p] = contrast[p] > threshold ? 255 : 0;
-    }
-    return { width: w, height: h, data: out };
-  }
-
-  // C はスライダーとパスoffsetで微調整（暗側に倒すほど黒が増える）
+  // Step 2: 局所適応二値化
+  // C は threshold とパスoffsetで微調整（大きいほど黒が減る）
   const manualBias = options.threshold - 120;
   const C = 12 + manualBias * 0.15 + thresholdOffset * 0.4;
   // 近傍ウィンドウ（枠の高さに比例、最低 15px）

@@ -1,16 +1,17 @@
 # シリアル読み取り試作版
 
-スマホのブラウザでカメラを開き、中央のガイド枠にシリアル欄を合わせて OCR する試作アプリです。
+応募券を何枚か並べて撮った写真から、シリアル（13 桁）をまとめて読み取る Web アプリです。
 
 ## 機能
 
-- 背面カメラ起動
-- 画面下寄りのガイド枠を切り出して OCR
-- OCR 結果から英数字 13 桁候補を抽出
-- 候補を選んで保存
-- 個別コピー / 全件コピー
-- localStorage で保持
-- 重複表示
+- 写真（複数枚可）からシリアルをまとめて読み取る
+  - 画像処理でシリアルの行を探し、応募券のフォントの字形と照合して 1 文字ずつ読む
+  - 迷った文字がある行だけ Tesseract.js にかけ、「要確認」として画像と並べて表示
+  - 末尾がシングル設定と違うシリアルに「末尾が違う」と表示（別シングルの券の混入確認）
+  - 読み取り結果の修正、手入力での追加、チェックしたものの一括保存
+- シングル設定（末尾・有効文字・応募ページ URL）
+- 保存一覧（個別コピー / 全件コピー / 削除、重複表示、localStorage で保持）
+- 応募ページの入力欄にシリアルを流し込むブックマークレット
 
 ## 起動手順
 
@@ -20,28 +21,15 @@ npm run dev
 ```
 
 開発サーバーが起動したら、表示された URL を開いて使ってください。
+`vite.config.ts` で `host: true` にしているので、同じネットワークのスマホからも開けます。
 
-## スマホで使うとき
+## 主なファイル
 
-- 同じネットワーク内で `npm run dev -- --host` を使うか、通常の `npm run dev` でも vite.config.ts で `host: true` にしているので LAN からアクセスできます。
-- iPhone の Safari はカメラ利用に HTTPS が必要になる場合があります。ローカル検証では Mac + Safari の制約に注意してください。
-- Android Chrome でも HTTPS または localhost 相当が必要です。
-
-## 調整ポイント
-
-`src/App.tsx` の以下で切り抜き位置を調整できます。
-
-```ts
-const cropWidth = Math.floor(videoWidth * 0.72);
-const cropHeight = Math.floor(videoHeight * 0.16);
-const cropX = Math.floor((videoWidth - cropWidth) / 2);
-const cropY = Math.floor(videoHeight * 0.74);
-```
-
-## 今後の改善候補
-
-- 文字補正ルールの強化 (`0/O`, `1/I/L`, `8/B`)
-- 候補選択ではなく自動確定ロジックの追加
-- PWA 化
-- CSV 出力
-- 撮影画像の台形補正
+| ファイル | 内容 |
+| --- | --- |
+| `src/utils/batch.ts` | 写真からシリアルの行を探す・文字を切り分ける |
+| `src/utils/glyphMatch.ts` | 字形の照合で 1 文字ずつ読む |
+| `src/utils/glyphTemplates.ts` | 応募券のフォントの字形データ（自動生成） |
+| `src/utils/photoRead.ts` | 写真 1 枚を読む流れ（行探し → 照合 → 必要なら OCR） |
+| `src/utils/ocr.ts` | Tesseract の結果を文字ごとに投票して集約 |
+| `src/components/PhotoBatchPanel.tsx` | まとめ読みの画面 |

@@ -15,6 +15,12 @@ import { readLineByGlyphs, resolveWithOcr } from "./glyphMatch";
 /** 切り出した行の、文字の高さ（画素）。照合・OCR ともこの大きさで行う */
 export const LINE_CHAR_HEIGHT = 48;
 
+/**
+ * 二値化の調整値（標準の 120）。
+ * 試験はすべてこの値で行っている。
+ */
+const BINARIZE_THRESHOLD = 120;
+
 /** 1 行ぶんの読み取り結果 */
 export type PhotoLineResult = {
   /** 読み取ったシリアル（読めなかったときは空文字） */
@@ -32,8 +38,6 @@ export type PhotoLineResult = {
 
 export type PhotoReadOptions = {
   validChars: Set<string>;
-  /** 二値化の調整（カメラ枠の調整パネルのしきい値と同じもの） */
-  threshold: number;
   /**
    * 前処理済みの行画像を OCR にかけ、候補（良い順、13 桁）を返す。
    * 複数の前処理（パス）をまとめて渡すので、投票して 1 つの候補列にすること。
@@ -62,7 +66,7 @@ export async function readSerialsFromPhoto(
       lineCropRect(line),
       LINE_CHAR_HEIGHT / line.charHeight
     );
-    const bin = preprocessForOcr(crop, { threshold: options.threshold });
+    const bin = preprocessForOcr(crop, { threshold: BINARIZE_THRESHOLD });
     const glyph = readLineByGlyphs(crop, bin, LINE_CHAR_HEIGHT, options.validChars);
 
     // 字形の照合で迷いなく読めたら、OCR はかけない（速い）
@@ -81,7 +85,7 @@ export async function readSerialsFromPhoto(
 
     options.onProgress?.(i, lines.length, true);
     const passImages = options.ocrPassOffsets.map((offset) =>
-      preprocessForOcr(crop, { threshold: options.threshold, thresholdOffset: offset })
+      preprocessForOcr(crop, { threshold: BINARIZE_THRESHOLD, thresholdOffset: offset })
     );
     let ocrCandidates: string[] = [];
     try {
