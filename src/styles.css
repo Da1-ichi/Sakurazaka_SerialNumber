@@ -603,3 +603,99 @@ input {
 .format-body > .btn {
   justify-self: start;
 }
+
+/* ─── 写真からまとめて読み取る ─── */
+
+.hidden-file-input {
+  display: none;
+}
+
+.batch-status {
+  margin-top: 12px;
+}
+
+.batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.batch-row {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.batch-row-check {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.batch-row-done {
+  opacity: 0.6;
+}
+
+.batch-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.batch-row-head input {
+  width: 20px;
+  height: 20px;
+}
+
+.batch-index {
+  font-weight: 700;
+  color: #475569;
+}
+
+.batch-line-image {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.batch-code-input {
+  font-size: 20px;
+  letter-spacing: 0.08em;
+}
+
+.batch-hint {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #92400e;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.badge-check {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge-muted {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.badge-done {
+  background: #d1fae5;
+  color: #065f46;
+}

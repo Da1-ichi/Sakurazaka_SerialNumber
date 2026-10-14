@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Block, Worker } from "tesseract.js";
+import type { Worker } from "tesseract.js";
 import "./styles.css";
 
 import type { CropSettings } from "./types";
@@ -28,9 +28,11 @@ import {
   extractRawSerials,
   aggregateCandidates,
   aggregateBySymbols,
+  collectSymbols,
 } from "./utils/ocr";
 import type { OcrSymbol, SerialRules } from "./utils/ocr";
 
+import { grayToRgba, preprocessForOcr, rgbaToGray } from "./utils/image";
 import { useCamera } from "./hooks/useCamera";
 import { useSerialItems } from "./hooks/useSerialItems";
 
@@ -40,6 +42,9 @@ import { CameraPanel } from "./components/CameraPanel";
 import { CandidatePanel } from "./components/CandidatePanel";
 import { BookmarkletPanel } from "./components/BookmarkletPanel";
 import { SavedItemList } from "./components/SavedItemList";
+import { PhotoBatchPanel } from "./components/PhotoBatchPanel";
+import type { GrayImage } from "./utils/image";
+import { grayToDataUrl } from "./utils/photoDecode";
 
 // ─── 設定の読み込み・整形 ────────────────────────────────────
 
@@ -167,34 +172,6 @@ function visibleSourceRect(video: HTMLVideoElement) {
   return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
 }
 
-/** blocks から 1 文字ずつの認識結果（確信度・代替候補つき）を平坦化して取り出す */
-function collectSymbols(blocks: Block[] | null): OcrSymbol[] {
-  const syms: OcrSymbol[] = [];
-  for (const block of blocks ?? []) {
-    for (const par of block.paragraphs ?? []) {
-      for (const line of par.lines ?? []) {
-        for (const word of line.words ?? []) {
-          for (const sym of word.symbols ?? []) {
-            const ch = (sym.text ?? "").toUpperCase();
-            if (!/[A-Z0-9]/.test(ch)) continue;
-            syms.push({
-              char: ch,
-              conf: sym.confidence ?? 0,
-              choices: (sym.choices ?? [])
-                .map((c) => ({
-                  t: (c.text ?? "").toUpperCase(),
-                  cf: c.confidence ?? 0,
-                }))
-                .filter((c) => /^[A-Z0-9]$/.test(c.t)),
-            });
-          }
-        }
-      }
-    }
-  }
-  return syms;
-}
-
 // ─── メインコンポーネント ────────────────────────────────────
 
 export default function SerialReaderPrototype() {
@@ -307,81 +284,15 @@ export default function SerialReaderPrototype() {
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, outW, outH);
 
-    const thresholdOffset = passCfg?.thresholdOffset ?? 0;
-
+    // 前処理（コントラスト強調 → 二値化）は写真のまとめ読みと共通
     const imageData = ctx.getImageData(0, 0, outW, outH);
-    const data = imageData.data;
-
-    // Step 1: グレースケール＋コントラスト強調
-    const gray = new Uint8ClampedArray(outW * outH);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      const adjusted = ((g / 255 - 0.5) * 1.5 + 0.5) * 255;
-      gray[p] = Math.max(0, Math.min(255, adjusted));
-    }
-
-    // Step 2: 二値化。method により方式を切り替える。
-    const method = passCfg?.method ?? "adaptive";
-    const manualBias = crop.threshold - 120;
-
-    if (method === "global") {
-      // グローバル固定二値化（影のない均一照明で安定）。
-      // スライダー値そのもの + パスoffset をしきい値に使う。
-      const threshold = crop.threshold + thresholdOffset;
-      for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-        const v = gray[p] > threshold ? 255 : 0;
-        data[i] = v;
-        data[i + 1] = v;
-        data[i + 2] = v;
-      }
-      ctx.putImageData(imageData, 0, 0);
-      return canvas.toDataURL("image/png");
-    }
-
-    // 局所適応二値化（影・照明ムラに強い）
-    //   各ピクセルの周辺領域の平均を局所しきい値とし、
-    //   「周辺平均より C 以上暗ければ黒」と判定する。
-    //   積分画像(integral image)で領域平均を O(1) 算出し全体 O(n) に抑える。
-    //   C はスライダーとパスoffsetで微調整（暗側に倒すほど黒が増える）。
-    const C = 12 + manualBias * 0.15 + thresholdOffset * 0.4;
-
-    // 近傍ウィンドウ半径（枠の高さに比例、最低でも 7px 確保し奇数寄りに）
-    const win = Math.max(15, Math.floor(outH / 4) | 1);
-    const r = Math.floor(win / 2);
-
-    // 積分画像: ii[(y+1)*(outW+1)+(x+1)] = 左上からの累積和
-    const iw = outW + 1;
-    const ii = new Float64Array(iw * (outH + 1));
-    for (let y = 0; y < outH; y++) {
-      let rowSum = 0;
-      for (let x = 0; x < outW; x++) {
-        rowSum += gray[y * outW + x];
-        ii[(y + 1) * iw + (x + 1)] = ii[y * iw + (x + 1)] + rowSum;
-      }
-    }
-
-    // Step 3: 各ピクセルを局所しきい値で二値化して RGBA に書き戻し
-    for (let y = 0; y < outH; y++) {
-      const y0 = Math.max(0, y - r);
-      const y1 = Math.min(outH, y + r + 1);
-      for (let x = 0; x < outW; x++) {
-        const x0 = Math.max(0, x - r);
-        const x1 = Math.min(outW, x + r + 1);
-        const area = (y1 - y0) * (x1 - x0);
-        const sum =
-          ii[y1 * iw + x1] -
-          ii[y0 * iw + x1] -
-          ii[y1 * iw + x0] +
-          ii[y0 * iw + x0];
-        const mean = sum / area;
-        const p = y * outW + x;
-        const v = gray[p] > mean - C ? 255 : 0;
-        const i = p * 4;
-        data[i] = v;
-        data[i + 1] = v;
-        data[i + 2] = v;
-      }
-    }
+    const gray = rgbaToGray(imageData.data, outW, outH);
+    const bin = preprocessForOcr(gray, {
+      threshold: crop.threshold,
+      thresholdOffset: passCfg?.thresholdOffset ?? 0,
+      method: passCfg?.method ?? "adaptive",
+    });
+    grayToRgba(bin, imageData.data);
     ctx.putImageData(imageData, 0, 0);
 
     return canvas.toDataURL("image/png");
@@ -604,12 +515,60 @@ export default function SerialReaderPrototype() {
     }
   }
 
+  // ─── 写真からのまとめ読み ──────────────────────────────────
+  //
+  // 字形の照合で迷った行だけがここに来る。カメラ枠の読み取りと同じ
+  // ワーカー・同じ集約（aggregateBySymbols）を使う。
+
+  async function recognizeLineImages(passImages: GrayImage[]): Promise<string[]> {
+    // 認識エンジンはカメラ側の状態表示に進み具合を書くので、終わったら元に戻す
+    // （まとめ読みの進み具合は、まとめ読みの欄に出している）
+    const cameraStatusText = statusTextRef.current;
+    try {
+      const worker = await ensureWorker();
+      const perPassSymbols: OcrSymbol[][] = [];
+      for (const img of passImages) {
+        const result = await worker.recognize(
+          grayToDataUrl(img),
+          {},
+          { blocks: true }
+        );
+        perPassSymbols.push(collectSymbols(result.data.blocks));
+      }
+      return aggregateBySymbols(perPassSymbols, rules);
+    } catch (error) {
+      // 失敗したワーカーは使い回さない
+      await discardWorker();
+      throw error;
+    } finally {
+      camera.setStatusText(cameraStatusText);
+    }
+  }
+
+  const savedCodes = useMemo(
+    () => new Set(serialItems.items.map((item) => item.code)),
+    [serialItems.items]
+  );
+
+  function saveBatch(codes: string[]) {
+    let saved = 0;
+    let skipped = 0;
+    for (const code of codes) {
+      // 保存済みのものは確認を出さずに飛ばす
+      if (serialItems.saveCode(code, { silent: true })) saved++;
+      else skipped++;
+    }
+    return { saved, skipped };
+  }
+
   // ─── 自動スキャン ──────────────────────────────────────────
   //
   // ループは「最新の値」を ref から読む。開始時点の値を閉じ込めないので、
   // 連続スキャン中に枠・末尾・有効文字・間隔を変えても次の読み取りから反映され、
   // オフにすれば読み取り中でも次の予約をしない。
 
+  const statusTextRef = useRef(camera.statusText);
+  statusTextRef.current = camera.statusText;
   const readSerialRef = useRef(readSerial);
   readSerialRef.current = readSerial;
   const autoScanEnabledRef = useRef(autoScanEnabled);
@@ -712,6 +671,23 @@ export default function SerialReaderPrototype() {
       <div className="app-container">
         <div className="panel">
           <h1 className="title">シリアル読み取り試作版</h1>
+          <p className="description">
+            応募券のシリアルを読み取ります。何枚もあるときは写真でまとめて、
+            1 枚ずつのときはカメラで読み取れます。
+          </p>
+        </div>
+
+        <PhotoBatchPanel
+          validChars={rules.validChars}
+          threshold={cropSettings.threshold}
+          ocrPassOffsets={QUICK_PASSES.map((p) => p.thresholdOffset)}
+          runOcr={recognizeLineImages}
+          savedCodes={savedCodes}
+          onSave={saveBatch}
+        />
+
+        <div className="panel">
+          <h2 className="section-heading">カメラで 1 枚ずつ読み取る</h2>
           <p className="description">
             カメラ映像のガイド枠を実物のコード文字列に合わせて読み取ります。
           </p>

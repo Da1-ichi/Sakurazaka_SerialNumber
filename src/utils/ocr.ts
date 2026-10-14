@@ -1,3 +1,4 @@
+import type { Block } from "tesseract.js";
 import {
   SERIAL_REGEX,
   CONFUSION_PAIRS,
@@ -244,6 +245,34 @@ export type OcrSymbol = {
   /** 代替候補（char と conf のペア）。legacy のみ取得可能 */
   choices: { t: string; cf: number }[];
 };
+
+/** blocks から 1 文字ずつの認識結果（確信度・代替候補つき）を平坦化して取り出す */
+export function collectSymbols(blocks: Block[] | null): OcrSymbol[] {
+  const syms: OcrSymbol[] = [];
+  for (const block of blocks ?? []) {
+    for (const par of block.paragraphs ?? []) {
+      for (const line of par.lines ?? []) {
+        for (const word of line.words ?? []) {
+          for (const sym of word.symbols ?? []) {
+            const ch = (sym.text ?? "").toUpperCase();
+            if (!/[A-Z0-9]/.test(ch)) continue;
+            syms.push({
+              char: ch,
+              conf: sym.confidence ?? 0,
+              choices: (sym.choices ?? [])
+                .map((c) => ({
+                  t: (c.text ?? "").toUpperCase(),
+                  cf: c.confidence ?? 0,
+                }))
+                .filter((c) => /^[A-Z0-9]$/.test(c.t)),
+            });
+          }
+        }
+      }
+    }
+  }
+  return syms;
+}
 
 /** 確信度がこれ未満の端の文字は枠線・ノイズとみなして窓選択から除外 */
 const EDGE_NOISE_CONF = 40;
