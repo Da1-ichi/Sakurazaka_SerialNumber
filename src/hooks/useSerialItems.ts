@@ -18,9 +18,8 @@ export function useSerialItems() {
   // 初回描画の時点で読み込む（空の一覧で上書き保存してしまうのを防ぐ）
   const [items, setItems] = useState<SerialItem[]>(loadItems);
   const [copiedMessage, setCopiedMessage] = useState("");
-  const [lastAutoSavedCode, setLastAutoSavedCode] = useState("");
 
-  // 連続スキャンのループなど、描画をまたいで呼ばれても最新の一覧で判定するための参照
+  // まとめて保存するときなど、描画をまたいで呼ばれても最新の一覧で判定するための参照
   const itemsRef = useRef(items);
   itemsRef.current = items;
 
@@ -54,14 +53,10 @@ export function useSerialItems() {
    * コードを保存する。保存したら true、しなかったら false を返す。
    *
    * 重複の扱い（二重応募を防ぐため、一覧全体と照合する）:
-   *   - 自動保存: 一覧のどこかに同じコードがあればスキップ
-   *   - 手動保存: 同じコードがあれば確認を出し、OK のときだけ保存
-   *     （silent のときは確認を出さずにスキップ）
+   *   同じコードがあれば確認を出し、OK のときだけ保存
+   *   （silent のときは確認を出さずにスキップ）
    */
-  function saveCode(
-    code: string,
-    options?: { silent?: boolean; isAuto?: boolean }
-  ): boolean {
+  function saveCode(code: string, options?: { silent?: boolean }): boolean {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return false;
 
@@ -69,7 +64,7 @@ export function useSerialItems() {
     const exists = current.some((item) => item.code === trimmed);
 
     if (exists) {
-      if (options?.isAuto || options?.silent) return false;
+      if (options?.silent) return false;
       const ok = window.confirm(
         `${trimmed} はすでに保存されています。もう一度保存しますか？`
       );
@@ -88,16 +83,7 @@ export function useSerialItems() {
     itemsRef.current = next;
     setItems(next);
 
-    if (options?.isAuto) {
-      setLastAutoSavedCode(trimmed);
-    }
-
     return true;
-  }
-
-  function addSelected(candidate: string): boolean {
-    if (!candidate) return false;
-    return saveCode(candidate);
   }
 
   async function copyCode(code: string) {
@@ -136,16 +122,13 @@ export function useSerialItems() {
   function clearAll() {
     if (!window.confirm("保存済みコードを全削除しますか？")) return;
     setItems([]);
-    setLastAutoSavedCode("");
   }
 
   return {
     items,
     copiedMessage,
-    lastAutoSavedCode,
     duplicateSet,
     saveCode,
-    addSelected,
     copyCode,
     copyAll,
     removeItem,
