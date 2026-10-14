@@ -21,6 +21,9 @@ import {
   resolveValidChars,
   sanitizeSuffix,
   sanitizeValidChars,
+  sanitizeSingleNumber,
+  singleNumberFromUrl,
+  buildTargetUrl,
 } from "./constants";
 import type { FormatSettings, PassConfig, UiSettings } from "./constants";
 import { clamp } from "./utils/helpers";
@@ -111,7 +114,10 @@ function loadCropSettings(): CropSettings {
 }
 
 function loadFormatSettings(): FormatSettings {
-  const saved = loadJson<FormatSettings>(FORMAT_SETTINGS_KEY);
+  // 以前は応募 URL（targetUrl）を直接保存していたので、そこからも枚数を拾う
+  const saved = loadJson<FormatSettings & { targetUrl?: unknown }>(
+    FORMAT_SETTINGS_KEY,
+  );
   if (!saved) return DEFAULT_FORMAT_SETTINGS;
   return {
     suffix:
@@ -122,10 +128,12 @@ function loadFormatSettings(): FormatSettings {
       typeof saved.validChars === "string"
         ? sanitizeValidChars(saved.validChars)
         : DEFAULT_FORMAT_SETTINGS.validChars,
-    targetUrl:
-      typeof saved.targetUrl === "string" && saved.targetUrl.trim()
-        ? saved.targetUrl
-        : DEFAULT_FORMAT_SETTINGS.targetUrl,
+    singleNumber:
+      sanitizeSingleNumber(saved.singleNumber) ??
+      (typeof saved.targetUrl === "string"
+        ? singleNumberFromUrl(saved.targetUrl)
+        : null) ??
+      DEFAULT_FORMAT_SETTINGS.singleNumber,
   };
 }
 
@@ -759,7 +767,7 @@ export default function SerialReaderPrototype() {
               items={serialItems.items}
               duplicateSet={serialItems.duplicateSet}
               copiedMessage={serialItems.copiedMessage}
-              targetUrl={formatSettings.targetUrl}
+              targetUrl={buildTargetUrl(formatSettings.singleNumber)}
               onCopyCode={serialItems.copyCode}
               onCopyAll={serialItems.copyAll}
               onRemove={serialItems.removeItem}

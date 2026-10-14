@@ -6,6 +6,10 @@ import {
   AUTO_SCAN_INTERVAL_MIN,
   sanitizeSuffix,
   sanitizeValidChars,
+  sanitizeSingleNumber,
+  buildTargetUrl,
+  SINGLE_NUMBER_MIN,
+  SINGLE_NUMBER_MAX,
 } from "../constants";
 
 type Props = {
@@ -53,6 +57,17 @@ export function ScanControls({
 }: Props) {
   const [showFormat, setShowFormat] = useState(false);
   const validCharsEmpty = sanitizeValidChars(formatSettings.validChars) === "";
+  // 入力途中（空欄など）でも打てるよう、欄の文字列は別に持つ
+  const [singleDraft, setSingleDraft] = useState(
+    String(formatSettings.singleNumber),
+  );
+  const [lastSingle, setLastSingle] = useState(formatSettings.singleNumber);
+  if (lastSingle !== formatSettings.singleNumber) {
+    // 「初期値に戻す」などで外から変わったとき欄も合わせる
+    setLastSingle(formatSettings.singleNumber);
+    setSingleDraft(String(formatSettings.singleNumber));
+  }
+  const singleDraftValid = sanitizeSingleNumber(singleDraft) !== null;
 
   return (
     <>
@@ -182,15 +197,36 @@ export function ScanControls({
             </label>
 
             <label className="format-field">
-              <span className="format-label">応募ページURL</span>
+              <span className="format-label">何枚目のシングル</span>
               <input
-                type="url"
-                value={formatSettings.targetUrl}
-                onChange={(e) => onFormatChange({ targetUrl: e.target.value })}
-                className="text-input"
+                type="number"
+                inputMode="numeric"
+                min={SINGLE_NUMBER_MIN}
+                max={SINGLE_NUMBER_MAX}
+                step={1}
+                value={singleDraft}
+                onChange={(e) => {
+                  const text = e.target.value.replace(/[^0-9]/g, "");
+                  setSingleDraft(text);
+                  const n = sanitizeSingleNumber(text);
+                  if (n !== null) onFormatChange({ singleNumber: n });
+                }}
+                onBlur={() =>
+                  setSingleDraft(String(formatSettings.singleNumber))
+                }
+                className="text-input mono"
                 autoComplete="off"
-                spellCheck={false}
               />
+              {!singleDraftValid && (
+                <span className="format-warning">
+                  {SINGLE_NUMBER_MIN}〜{SINGLE_NUMBER_MAX}
+                  の数字を入れてください。いまは{formatSettings.singleNumber}
+                  枚目のまま使っています。
+                </span>
+              )}
+              <span className="format-hint">
+                応募ページ: {buildTargetUrl(formatSettings.singleNumber)}
+              </span>
             </label>
 
             <button
